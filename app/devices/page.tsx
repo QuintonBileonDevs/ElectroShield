@@ -10,14 +10,11 @@ import { Navbar } from "@/components/Navbar";
 import { Footer } from "@/components/Footer";
 import { useAuth } from "@/components/auth-provider";
 import Link from "next/link";
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
+import { collection, query, where, onSnapshot } from "firebase/firestore";
+import { db } from "@/lib/firebase";
 
-const MOCK_DEVICES = [
-  { id: '1', name: 'iPhone 15 Pro', brand: 'Apple', serial: 'S/N: 23948203', status: 'secured', type: 'Phone', lastSync: '2m ago' },
-  { id: '2', name: 'MacBook Pro M3', brand: 'Apple', serial: 'S/N: 92834722', status: 'secured', type: 'Laptop', lastSync: '1h ago' },
-  { id: '3', name: 'Galaxy Tab S9', brand: 'Samsung', serial: 'S/N: 11223344', status: 'caution', type: 'Tablet', lastSync: '3d ago' },
-  { id: '4', name: 'Pixel Watch 2', brand: 'Google', serial: 'S/N: 55667788', status: 'lost', type: 'Watch', lastSync: 'Never' },
-];
+
 
 const getStatusConfig = (status: string) => {
   switch (status) {
@@ -59,6 +56,23 @@ const getStatusConfig = (status: string) => {
 export default function DevicesPage() {
   const { user, loading } = useAuth();
   const [searchTerm, setSearchTerm] = useState("");
+  const [devicesList, setDevicesList] = useState<any[]>([]);
+
+  useEffect(() => {
+    if (!user?.id) return;
+    const q = query(collection(db, "devices"), where("ownerId", "==", user.id));
+    const unsubscribe = onSnapshot(
+      q, 
+      (snapshot) => {
+        const devs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        setDevicesList(devs);
+      },
+      (error) => {
+        console.warn("Firestore error listening to devices:", error.message);
+      }
+    );
+    return () => unsubscribe();
+  }, [user?.id]);
 
   if (loading || !user) {
     return (
@@ -204,7 +218,7 @@ export default function DevicesPage() {
            <div className="p-4 md:p-8 lg:p-12 relative z-10">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6 md:gap-8">
                 <AnimatePresence mode="popLayout">
-                  {MOCK_DEVICES.filter(d => d.name.toLowerCase().includes(searchTerm.toLowerCase())).map((device, i) => (
+                  {devicesList.filter(d => d.name.toLowerCase().includes(searchTerm.toLowerCase())).map((device, i) => (
                     <motion.div
                       layout
                       key={device.id}
@@ -295,7 +309,7 @@ export default function DevicesPage() {
                 </AnimatePresence>
               </div>
 
-              {MOCK_DEVICES.filter(d => d.name.toLowerCase().includes(searchTerm.toLowerCase())).length === 0 && (
+              {devicesList.filter(d => d.name.toLowerCase().includes(searchTerm.toLowerCase())).length === 0 && (
                 <motion.div 
                   initial={{ opacity: 0, scale: 0.9 }}
                   animate={{ opacity: 1, scale: 1 }}

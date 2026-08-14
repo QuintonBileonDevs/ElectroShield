@@ -1,0 +1,65 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() { return request.auth != null; }
+    function isOwner(userId) { return isSignedIn() && request.auth.uid == userId; }
+    function isAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == 'gsetlamelo@gmail.com' ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    // Users collection
+    match /users/{userId} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn();
+      allow delete: if isAdmin();
+    }
+
+    // Admins metadata collection
+    match /admins/{adminId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    // Devices collection (public lookup for IMEI/Serial verification)
+    match /devices/{deviceId} {
+      allow read: if true;
+      allow create, update, delete: if isSignedIn();
+    }
+
+    // Organizations collection
+    match /organizations/{orgId} {
+      allow read: if true;
+      allow write: if isSignedIn();
+    }
+
+    // Sub-Users collection
+    match /subUsers/{subUserId} {
+      allow read: if true;
+      allow write: if isSignedIn();
+    }
+
+    // Claims collection
+    match /claims/{claimId} {
+      allow read, write: if isSignedIn();
+    }
+
+    // Police thefts & hotlists
+    match /policeThefts/{theftId} {
+      allow read, write: if isSignedIn();
+    }
+
+    // Real-time Notifications collection
+    match /notifications/{notifId} {
+      allow read: if true;
+      allow create, update, delete: if true;
+    }
+
+    // General app collections
+    match /{document=**} {
+      allow read, write: if isSignedIn();
+    }
+  }
+}

@@ -1,6 +1,7 @@
 'use client';
 import Link from 'next/link';
 import { Shield } from 'lucide-react';
+import { useAuth } from '@/components/auth-provider';
 
 interface LogoProps {
   className?: string;
@@ -8,8 +9,22 @@ interface LogoProps {
 }
 
 export function Logo({ className = "", showText = true }: LogoProps) {
+  const { user } = useAuth();
+
+  let targetHref = '/';
+  if (typeof window !== 'undefined') {
+    const sessionAdmin = sessionStorage.getItem('super_admin_authenticated') === 'true';
+    const isSuperAdmin = sessionAdmin || user?.accountType === 'super_admin' || user?.accountType === 'admin';
+
+    if (isSuperAdmin) {
+      targetHref = '/admin?tab=overview';
+    } else if (user) {
+      targetHref = '/dashboard';
+    }
+  }
+
   return (
-    <Link href="/" className={`flex items-center gap-2.5 group ${className}`}>
+    <Link href={targetHref} className={`flex items-center gap-2.5 group ${className}`}>
       <div className="relative w-10 h-10 rounded-xl bg-sky-600 dark:bg-sky-500 flex items-center justify-center transition-all duration-500 group-hover:rotate-[360deg] shadow-lg shadow-sky-600/20">
         <Shield className="w-6 h-6 text-white fill-current" />
         <div className="absolute -top-1 -right-1 w-3 h-3 bg-white dark:bg-sky-400 rounded-full border-2 border-sky-600 dark:border-sky-900 animate-pulse" />

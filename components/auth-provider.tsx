@@ -1,6 +1,8 @@
 'use client';
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { ACCOUNT_TYPES } from '@/lib/account-types';
+import { auth, db } from '@/lib/firebase';
+import { onAuthStateChanged, signOut, User as FirebaseUser } from 'firebase/auth';
+import { doc, getDoc, setDoc, onSnapshot } from 'firebase/firestore';
 
 interface User {
   id: string;
@@ -28,43 +30,92 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Simulating a logged in user with a random account type for demonstration
-    // In a real app, this would come from Firebase or an API
-    
-    const initializeAuth = () => {
-      const savedType = localStorage.getItem('mock_account_type') || 'individual';
-      const type = ACCOUNT_TYPES.find(t => t.id === savedType) || ACCOUNT_TYPES[0];
-      
-      const colorParts = type.color.split(' ');
-      const textClass = colorParts.find(p => p.startsWith('text-')) || 'text-sky-500';
-      const bgClass = colorParts.find(p => p.startsWith('bg-')) || 'bg-sky-500/10';
-      const borderClass = colorParts.find(p => p.startsWith('border-')) || 'border-sky-500/20';
-      
-      const primaryColor = textClass.split('-')[1];
+    let unsubscribeDoc: (() => void) | null = null;
 
-      setUser({
-        id: '1',
-        name: 'John Doe',
-        email: 'john@example.com',
-        accountType: type.id,
-        color: {
-          text: textClass,
-          bg: bgClass,
-          border: borderClass,
-          primary: primaryColor,
-        }
-      });
-      setLoading(false);
+    const unsubscribeAuth = onAuthStateChanged(auth, (firebaseUser) => {
+      if (unsubscribeDoc) {
+        unsubscribeDoc();
+        unsubscribeDoc = null;
+      }
+
+      if (firebaseUser) {
+        const userDocRef = doc(db, 'users', firebaseUser.uid);
+        
+        unsubscribeDoc = onSnapshot(userDocRef, async (userSnap) => {
+          let accountType = 'individual';
+          let name = firebaseUser.displayName || firebaseUser.email?.split('@')[0] || 'User';
+
+          if (userSnap.exists()) {
+            const data = userSnap.data();
+            accountType = data.role || data.accountType || 'individual';
+            name = data.displayName || name;
+          } else {
+            try {
+              await setDoc(userDocRef, {
+                uid: firebaseUser.uid,
+                email: firebaseUser.email,
+                displayName: name,
+                role: accountType,
+                accountType: accountType,
+                createdAt: new Date().toISOString()
+              });
+            } catch (e) {
+              console.warn("Initial user doc creation notice:", e);
+            }
+          }
+
+          let primaryColor = 'sky-500';
+          if (accountType === 'police') primaryColor = 'rose-500';
+          else if (accountType === 'burs') primaryColor = 'orange-500';
+
+          setUser({
+            id: firebaseUser.uid,
+            name,
+            email: firebaseUser.email || '',
+            accountType,
+            color: {
+              text: `text-${primaryColor}`,
+              bg: `bg-${primaryColor}/10`,
+              border: `border-${primaryColor}/20`,
+              primary: primaryColor.split('-')[0],
+            }
+          });
+          setLoading(false);
+        }, (err) => {
+          console.warn("User doc listener notice:", err);
+          // Fallback basic user
+          setUser({
+            id: firebaseUser.uid,
+            name: firebaseUser.displayName || firebaseUser.email?.split('@')[0] || 'User',
+            email: firebaseUser.email || '',
+            accountType: 'individual',
+            color: {
+              text: 'text-sky-500',
+              bg: 'bg-sky-500/10',
+              border: 'border-sky-500/20',
+              primary: 'sky',
+            }
+          });
+          setLoading(false);
+        });
+      } else {
+        setUser(null);
+        setLoading(false);
+      }
+    });
+
+    return () => {
+      if (unsubscribeDoc) unsubscribeDoc();
+      unsubscribeAuth();
     };
-
-    // Use a small timeout to avoid synchronous setState in effect warning
-    const timer = setTimeout(initializeAuth, 100);
-    return () => clearTimeout(timer);
   }, []);
 
-  const logout = () => {
-    setUser(null);
-    localStorage.removeItem('mock_account_type');
+  const logout = async () => {
+    try {
+      await signOut(auth);
+    } catch (error) {
+      console.error("Error signing out", error);
+    }
   };
 
   return (

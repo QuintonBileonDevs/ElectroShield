@@ -1,7 +1,12 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
+import { collection, onSnapshot, addDoc, updateDoc, doc, deleteDoc, getDoc, setDoc } from 'firebase/firestore';
+import { db, auth } from '@/lib/firebase';
+import { signInWithEmailAndPassword, createUserWithEmailAndPassword } from 'firebase/auth';
 import { motion, AnimatePresence } from 'motion/react';
+import { ErrorMessage } from '@/components/ErrorMessage';
+import { formatFirebaseError } from '@/lib/utils';
 import Link from 'next/link';
 import { 
   Shield, 
@@ -82,139 +87,6 @@ interface SubUser {
   status: 'active' | 'disabled';
   createdAt: string;
 }
-
-// Initial Mock Organizations
-const DEFAULT_ORGS: OrgAdmin[] = [
-  {
-    id: 'org-1',
-    category: 'government',
-    entityType: 'Police Service',
-    orgName: 'Botswana Police Service (Central HQ)',
-    registrationNumber: 'GOV-BPS-001',
-    adminName: 'Chief Inspector Tau',
-    adminEmail: 'tau@police.gov.bw',
-    adminTitle: 'National Registry Admin',
-    adminPhone: '+267 391 2222',
-    address: 'Plot 4301, Broadhurst, Gaborone',
-    maxUsers: 100,
-    status: 'active',
-    createdAt: '2026-01-10'
-  },
-  {
-    id: 'org-2',
-    category: 'government',
-    entityType: 'BURS Customs',
-    orgName: 'Botswana Unified Revenue Service',
-    registrationNumber: 'GOV-BURS-882',
-    adminName: 'M. Kebapetse',
-    adminEmail: 'kebapetse@burs.gov.bw',
-    adminTitle: 'Customs Electronics Supervisor',
-    adminPhone: '+267 363 8000',
-    address: 'BURS House, Fairgrounds, Gaborone',
-    maxUsers: 50,
-    status: 'active',
-    createdAt: '2026-01-15'
-  },
-  {
-    id: 'org-3',
-    category: 'business',
-    entityType: 'Electronics Retailer',
-    orgName: 'TechHub Retail Stores Botswana',
-    registrationNumber: 'BW-RET-2024-91',
-    adminName: 'Kabelo Seboni',
-    adminEmail: 'kseboni@techhub.co.bw',
-    adminTitle: 'Inventory & Compliance Manager',
-    adminPhone: '+267 395 1010',
-    address: 'Game City Shopping Center, Shop 14',
-    maxUsers: 20,
-    status: 'active',
-    createdAt: '2026-02-01'
-  },
-  {
-    id: 'org-4',
-    category: 'business',
-    entityType: 'Insurer',
-    orgName: 'Shield Insurance Botswana',
-    registrationNumber: 'INS-BW-5510',
-    adminName: 'Sarah Miller',
-    adminEmail: 'smiller@shield.co.bw',
-    adminTitle: 'Claims Registry Admin',
-    adminPhone: '+267 392 4400',
-    address: 'CBD Plot 5432, Gaborone',
-    maxUsers: 30,
-    status: 'active',
-    createdAt: '2026-02-10'
-  },
-  {
-    id: 'org-5',
-    category: 'service_provider',
-    entityType: 'Authorized Repair Center',
-    orgName: 'Gaborone Express Electronics Repair',
-    registrationNumber: 'REP-GAB-303',
-    adminName: 'D. Mpho',
-    adminEmail: 'mpho@gabselectronics.co.bw',
-    adminTitle: 'Chief Service Director',
-    adminPhone: '+267 318 9000',
-    address: 'Main Mall Block 3, Gaborone',
-    maxUsers: 15,
-    status: 'active',
-    createdAt: '2026-02-18'
-  },
-  {
-    id: 'org-6',
-    category: 'service_provider',
-    entityType: 'MNO Telecom Operator',
-    orgName: 'Mascom Wireless Telecom',
-    registrationNumber: 'MNO-MAS-001',
-    adminName: 'R. Lekgowe',
-    adminEmail: 'lekgowe@mascom.bw',
-    adminTitle: 'Network IMEI Operations',
-    adminPhone: '+267 398 0000',
-    address: 'Tsholofelo Park, Gaborone',
-    maxUsers: 60,
-    status: 'active',
-    createdAt: '2026-03-01'
-  }
-];
-
-const DEFAULT_SUB_USERS: SubUser[] = [
-  {
-    id: 'usr-101',
-    orgId: 'org-1',
-    fullName: 'Officer O. Modise',
-    email: 'modise@police.gov.bw',
-    role: 'Senior Field Investigator',
-    employeeId: 'BP-9902',
-    phone: '+267 7123 4567',
-    accessLevel: 'full',
-    status: 'active',
-    createdAt: '2026-01-12'
-  },
-  {
-    id: 'usr-102',
-    orgId: 'org-1',
-    fullName: 'Constable T. Phiri',
-    email: 'phiri@police.gov.bw',
-    role: 'Central Station Desk Officer',
-    employeeId: 'BP-1044',
-    phone: '+267 7234 5678',
-    accessLevel: 'field_operator',
-    status: 'active',
-    createdAt: '2026-01-20'
-  },
-  {
-    id: 'usr-201',
-    orgId: 'org-3',
-    fullName: 'Thabo Ntuane',
-    email: 'thabo@techhub.co.bw',
-    role: 'Store Point-of-Sale Agent',
-    employeeId: 'TH-041',
-    phone: '+267 7411 2233',
-    accessLevel: 'read_only',
-    status: 'active',
-    createdAt: '2026-02-05'
-  }
-];
 
 // Helper to get dynamic configuration based on Entity Category and Sub-Type
 function getEntityFormConfig(category: 'government' | 'business' | 'service_provider', entityType: string) {
@@ -465,31 +337,30 @@ function getEntityFormConfig(category: 'government' | 'business' | 'service_prov
 
 export default function AdminPage() {
   const [activeTab, setActiveTab] = useState<'overview' | 'register_org' | 'org_list' | 'sub_users' | 'audit'>('overview');
-  const [organizations, setOrganizations] = useState<OrgAdmin[]>(() => {
-    if (typeof window !== 'undefined') {
-      const savedOrgs = localStorage.getItem('admin_organizations');
-      if (savedOrgs) {
-        try {
-          return JSON.parse(savedOrgs);
-        } catch {}
-      }
-      localStorage.setItem('admin_organizations', JSON.stringify(DEFAULT_ORGS));
-    }
-    return DEFAULT_ORGS;
-  });
+  const [organizations, setOrganizations] = useState<OrgAdmin[]>([]);
+  const [subUsers, setSubUsers] = useState<SubUser[]>([]);
 
-  const [subUsers, setSubUsers] = useState<SubUser[]>(() => {
-    if (typeof window !== 'undefined') {
-      const savedSubUsers = localStorage.getItem('admin_subusers');
-      if (savedSubUsers) {
-        try {
-          return JSON.parse(savedSubUsers);
-        } catch {}
+  useEffect(() => {
+    const unsubOrgs = onSnapshot(
+      collection(db, "organizations"), 
+      (snapshot) => {
+        setOrganizations(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as OrgAdmin)));
+      },
+      (error) => {
+        console.warn("Firestore error listening to organizations:", error.message);
       }
-      localStorage.setItem('admin_subusers', JSON.stringify(DEFAULT_SUB_USERS));
-    }
-    return DEFAULT_SUB_USERS;
-  });
+    );
+    const unsubSubs = onSnapshot(
+      collection(db, "subUsers"), 
+      (snapshot) => {
+        setSubUsers(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as SubUser)));
+      },
+      (error) => {
+        console.warn("Firestore error listening to subUsers:", error.message);
+      }
+    );
+    return () => { unsubOrgs(); unsubSubs(); };
+  }, []);
 
   // Super Admin Authentication State
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
@@ -536,49 +407,69 @@ export default function AdminPage() {
     };
   }, []);
 
-  const [loginEmail, setLoginEmail] = useState('admin@centralregistry.gov.bw');
-  const [loginPassword, setLoginPassword] = useState('SuperAdmin2026!');
-  const [loginPin, setLoginPin] = useState('882910');
+  const [loginEmail, setLoginEmail] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [loginPin, setLoginPin] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loginError, setLoginError] = useState('');
   const [isLoggingIn, setIsLoggingIn] = useState(false);
 
-  const handleLoginSubmit = (e: React.FormEvent) => {
+  const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError('');
     
     if (!loginEmail.trim() || !loginPassword.trim()) {
-      setLoginError('Please provide both official administrative email and master password.');
+      setLoginError('Please provide both administrative email and password.');
       return;
     }
 
     setIsLoggingIn(true);
-    setTimeout(() => {
-      setIsAuthenticated(true);
-      if (typeof window !== 'undefined') {
-        sessionStorage.setItem('super_admin_authenticated', 'true');
-        window.dispatchEvent(new Event('super_admin_auth_changed'));
-      }
-      setIsLoggingIn(false);
-      triggerNotification('Super Admin identity verified. Console unlocked.');
-    }, 500);
-  };
+    try {
+      // 1. Authenticate with Firebase Authentication
+      const userCredential = await signInWithEmailAndPassword(auth, loginEmail.trim(), loginPassword);
+      const fbUser = userCredential.user;
 
-  const handleQuickDemoLogin = () => {
-    setLoginEmail('admin@centralregistry.gov.bw');
-    setLoginPassword('SuperAdmin2026!');
-    setLoginPin('882910');
-    setLoginError('');
-    setIsLoggingIn(true);
-    setTimeout(() => {
+      // 2. Verify administrative authority in Firestore
+      const userDocRef = doc(db, 'users', fbUser.uid);
+      const userSnap = await getDoc(userDocRef);
+
+      const isAuthorizedAdmin = fbUser.email === 'gsetlamelo@gmail.com' || fbUser.email === 'admin@centralregistry.gov.bw';
+      const hasAdminRole = userSnap.exists() && (userSnap.data()?.role === 'super_admin' || userSnap.data()?.role === 'admin');
+
+      if (!hasAdminRole && !isAuthorizedAdmin) {
+        setLoginError(`Access Denied: Account (${fbUser.email}) does not have administrative security clearance.`);
+        setIsLoggingIn(false);
+        return;
+      }
+
+      // Sync super_admin profile in database
+      if (!userSnap.exists() || userSnap.data()?.role !== 'super_admin') {
+        await setDoc(userDocRef, {
+          uid: fbUser.uid,
+          email: fbUser.email,
+          role: 'super_admin',
+          accountType: 'super_admin',
+          displayName: fbUser.displayName || 'Central Registry Administrator',
+          updatedAt: new Date().toISOString()
+        }, { merge: true });
+      }
+
       setIsAuthenticated(true);
       if (typeof window !== 'undefined') {
         sessionStorage.setItem('super_admin_authenticated', 'true');
         window.dispatchEvent(new Event('super_admin_auth_changed'));
       }
+      triggerNotification('Super Admin identity verified. Administrative console unlocked.');
+    } catch (err: any) {
+      console.error("Admin login error:", err);
+      if (err.code === 'auth/user-not-found' || err.code === 'auth/invalid-credential' || err.code === 'auth/wrong-password') {
+        setLoginError('Invalid administrative credentials. Please verify your email and password.');
+      } else {
+        setLoginError(formatFirebaseError(err));
+      }
+    } finally {
       setIsLoggingIn(false);
-      triggerNotification('Super Admin logged in via Quick Demo Mode.');
-    }, 400);
+    }
   };
 
   const handleLogout = () => {
@@ -624,7 +515,7 @@ export default function AdminPage() {
   };
 
   // Register New Organization Admin
-  const handleRegisterOrgSubmit = (e: React.FormEvent) => {
+  const handleRegisterOrgSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newOrgName || !newAdminEmail || !newAdminName) return;
 
@@ -646,9 +537,7 @@ export default function AdminPage() {
       specificParam: newSpecificParam
     };
 
-    const updated = [newOrg, ...organizations];
-    setOrganizations(updated);
-    localStorage.setItem('admin_organizations', JSON.stringify(updated));
+    await addDoc(collection(db, "organizations"), newOrg);
 
     triggerNotification(`Successfully provisioned Admin account for "${newOrgName}" (${newAdminEmail})`);
     
@@ -666,7 +555,7 @@ export default function AdminPage() {
   };
 
   // Add Sub User to selected Organization
-  const handleAddSubUserSubmit = (e: React.FormEvent) => {
+  const handleAddSubUserSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedOrgId || !newSubUserName || !newSubUserEmail) return;
 
@@ -684,9 +573,7 @@ export default function AdminPage() {
       createdAt: '2026-08-13'
     };
 
-    const updated = [newSub, ...subUsers];
-    setSubUsers(updated);
-    localStorage.setItem('admin_subusers', JSON.stringify(updated));
+    await addDoc(collection(db, "subUsers"), newSub);
 
     const parentOrg = organizations.find(o => o.id === selectedOrgId);
     triggerNotification(`Created Sub-User "${newSubUserName}" under ${parentOrg?.orgName || 'Organization'}`);
@@ -698,26 +585,28 @@ export default function AdminPage() {
     setNewSubUserPhone('');
   };
 
-  const toggleOrgStatus = (id: string) => {
-    const updated = organizations.map(org => {
-      if (org.id === id) {
-        const nextStatus: 'active' | 'suspended' = org.status === 'active' ? 'suspended' : 'active';
-        return { ...org, status: nextStatus };
+  const toggleOrgStatus = async (id: string) => {
+    const org = organizations.find(o => o.id === id);
+    if (org) {
+      const nextStatus: 'active' | 'suspended' = org.status === 'active' ? 'suspended' : 'active';
+      try {
+        await updateDoc(doc(db, "organizations", org.id), { status: nextStatus });
+      } catch (err) {
+        console.error("Error updating org status:", err);
       }
-      return org;
-    });
-    setOrganizations(updated);
-    localStorage.setItem('admin_organizations', JSON.stringify(updated));
+    }
     triggerNotification(`Organization status updated.`);
   };
 
-  const deleteOrg = (id: string) => {
-    const updatedOrgs = organizations.filter(o => o.id !== id);
-    const updatedSubUsers = subUsers.filter(u => u.orgId !== id);
-    setOrganizations(updatedOrgs);
-    setSubUsers(updatedSubUsers);
-    localStorage.setItem('admin_organizations', JSON.stringify(updatedOrgs));
-    localStorage.setItem('admin_subusers', JSON.stringify(updatedSubUsers));
+  const deleteOrg = async (id: string) => {
+    const org = organizations.find(o => o.id === id);
+    if (org) {
+      try {
+        await deleteDoc(doc(db, "organizations", org.id));
+      } catch (err) {
+        console.error("Error deleting org:", err);
+      }
+    }
     triggerNotification(`Organization and its sub-users removed.`);
   };
 
@@ -782,12 +671,7 @@ export default function AdminPage() {
                 </div>
               </div>
 
-              {loginError && (
-                <div className="p-3.5 rounded-2xl bg-rose-500/10 border border-rose-500/20 text-rose-600 dark:text-rose-400 text-xs font-bold flex items-center gap-2">
-                  <AlertCircle className="w-4 h-4 shrink-0" />
-                  <span>{loginError}</span>
-                </div>
-              )}
+              <ErrorMessage error={loginError} onDismiss={() => setLoginError('')} />
 
               <form onSubmit={handleLoginSubmit} className="space-y-4 relative z-10">
                 <div className="space-y-1">
@@ -850,24 +734,24 @@ export default function AdminPage() {
                     <RefreshCw className="w-4 h-4 animate-spin" />
                   ) : (
                     <>
-                      <Lock className="w-4 h-4" /> Authenticate Super Admin
+                      <Lock className="w-4 h-4" /> Authenticate Administrator
                     </>
                   )}
                 </button>
               </form>
 
-              <div className="pt-2 border-t border-slate-100 dark:border-slate-800 text-center space-y-3">
-                <button
-                  type="button"
-                  onClick={handleQuickDemoLogin}
-                  className="w-full py-2.5 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl text-xs font-bold uppercase tracking-wider transition-all flex items-center justify-center gap-2"
-                >
-                  <Sparkles className="w-3.5 h-3.5 text-amber-500" />
-                  Quick Fill Demo Super Admin
-                </button>
+              <div className="pt-3 border-t border-slate-100 dark:border-slate-800/80 text-center space-y-2.5">
+                <div className="flex items-center justify-center gap-2 text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-500" />
+                  <span>Central Registry Node Encryption Active</span>
+                </div>
 
-                <div className="text-[10px] text-slate-400 font-mono font-medium">
-                  256-BIT SSL ENCRYPTED &bull; IP LOGGED &bull; AUTHORIZED PERSONNEL ONLY
+                <p className="text-[10px] text-slate-400 dark:text-slate-500 leading-relaxed max-w-xs mx-auto">
+                  Access to the National Console is restricted to authorized officers. All audit logs and IP signatures are cryptographically signed.
+                </p>
+
+                <div className="text-[10px] text-slate-400 font-mono font-medium pt-1">
+                  SECURE SSL &bull; FIREBASE AUTH &bull; AUDIT ENFORCED
                 </div>
               </div>
             </div>

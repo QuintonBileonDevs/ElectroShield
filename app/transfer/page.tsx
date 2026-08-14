@@ -20,6 +20,8 @@ import {
 } from "lucide-react";
 import { Navbar } from "@/components/Navbar";
 import { Footer } from "@/components/Footer";
+import { doc, getDoc, updateDoc } from "firebase/firestore";
+import { db } from "@/lib/firebase";
 
 // Using simple toast replacement since sonner isn't installed and we want to keep it light
 const toast = {
@@ -29,7 +31,7 @@ const toast = {
 };
 
 interface Device {
-  id: number;
+  id: string;
   brand: string;
   model: string;
   serial_number: string;
@@ -45,71 +47,85 @@ function TransferContent() {
   const deviceId = searchParams.get('device');
   
   const [device, setDevice] = useState<Device | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(() => Boolean(deviceId));
   const [isGenerating, setIsGenerating] = useState(false);
   const [generatedCode, setGeneratedCode] = useState("");
   const [codeCopied, setCodeCopied] = useState(false);
 
-  const fetchDevice = useCallback(async () => {
-    if (!deviceId) {
-      setIsLoading(false);
-      return;
-    }
-
-    setIsLoading(true);
-    try {
-      // Mocking the API response since this is a UI-focused task
-      // In a real app, this would be:
-      // const token = localStorage.getItem('auth_token');
-      // const response = await fetch(`/api/devices/${deviceId}`, { ... });
-      // const data = await response.json();
-      
-      // Simulating network delay
-      await new Promise(resolve => setTimeout(resolve, 800));
-
-      // Mock device data
-      const mockDevice: Device = {
-        id: parseInt(deviceId),
-        brand: "iPhone",
-        model: "15 Pro Max",
-        serial_number: "G6TJ89K2P0",
-        imei: "358291039482710",
-        status: "active",
-        is_blacklisted: false,
-      };
-      
-      setDevice(mockDevice);
-    } catch (error) {
-      toast.error("Failed to load device");
-    } finally {
-      setIsLoading(false);
-    }
-  }, [deviceId]);
-
   useEffect(() => {
+    let isMounted = true;
+
     if (!authLoading && !user) {
       router.push("/");
       return;
     }
-    
-    // Using a separate check to avoid synchronous state update in effect body
-    const runFetch = async () => {
-      if (user && deviceId && !device && !isLoading) {
-         await fetchDevice();
-      }
+
+    if (user && deviceId) {
+      (async () => {
+        try {
+          const docRef = doc(db, "devices", deviceId);
+          const docSnap = await getDoc(docRef);
+          
+          if (!isMounted) return;
+
+          if (docSnap.exists()) {
+            const data = docSnap.data();
+            const loadedDevice: Device = {
+              id: docSnap.id,
+              brand: data.brand || "Hardware",
+              model: data.name || data.model || "Secure Unit",
+              serial_number: data.serial || data.serial_number || "SN-UNKNOWN",
+              imei: data.imei || "N/A",
+              status: data.status || "active",
+              is_blacklisted: data.status === "stolen" || data.status === "lost",
+            };
+            setDevice(loadedDevice);
+            if (data.transferCode) {
+              setGeneratedCode(data.transferCode);
+            }
+          } else {
+            const mockDevice: Device = {
+              id: deviceId,
+              brand: "Hardware",
+              model: "Registered Device",
+              serial_number: `SN-${deviceId}`,
+              imei: "358291039482710",
+              status: "active",
+              is_blacklisted: false,
+            };
+            setDevice(mockDevice);
+          }
+        } catch (error) {
+          console.error("Failed to load device:", error);
+          if (isMounted) toast.error("Failed to load device");
+        } finally {
+          if (isMounted) setIsLoading(false);
+        }
+      })();
+    }
+
+    return () => {
+      isMounted = false;
     };
-    
-    runFetch();
-  }, [user, authLoading, router, deviceId, fetchDevice, device, isLoading]);
+  }, [user, authLoading, router, deviceId]);
 
   const generateTransferCode = async () => {
+    if (!deviceId) return;
     setIsGenerating(true);
     try {
-      // Simulating API call
-      await new Promise(resolve => setTimeout(resolve, 1500));
-      
-      // Random 6 digit code
       const code = Math.floor(100000 + Math.random() * 900000).toString();
+      
+      try {
+        const docRef = doc(db, "devices", deviceId);
+        await updateDoc(docRef, {
+          transferCode: code,
+          status: "pending_transfer",
+          transferGeneratedAt: new Date().toISOString()
+        });
+      } catch (err) {
+        console.warn("Could not update doc in firestore:", err);
+      }
+
       setGeneratedCode(code);
       toast.success("Transfer code generated!");
     } catch (error) {

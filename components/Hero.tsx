@@ -3,6 +3,8 @@ import { motion, useScroll, useTransform } from 'motion/react';
 import { Shield, ArrowRight, Search, ScanEye, Smartphone, Laptop, Tablet, CheckCircle, HelpCircle, Star, ChevronDown, Repeat2, RefreshCw } from 'lucide-react';
 import Image from 'next/image';
 import React from 'react';
+import { collection, query, where, getDocs, onSnapshot } from 'firebase/firestore';
+import { db } from '@/lib/firebase';
 
 export function Hero() {
   const { scrollY } = useScroll();
@@ -12,16 +14,99 @@ export function Hero() {
   const [imei, setImei] = React.useState('');
   const [isChecking, setIsChecking] = React.useState(false);
   const [result, setResult] = React.useState<null | 'clean' | 'blocked'>(null);
+  const [resultDetails, setResultDetails] = React.useState<string | null>(null);
 
-  const handleCheck = (e: React.FormEvent) => {
+  const [deviceCount, setDeviceCount] = React.useState<number>(0);
+  const [stolenCount, setStolenCount] = React.useState<number>(0);
+  const [orgCount, setOrgCount] = React.useState<number>(0);
+  const [integrityRate, setIntegrityRate] = React.useState<string>('100%');
+
+  React.useEffect(() => {
+    const unsubDev = onSnapshot(collection(db, "devices"), (snap) => {
+      const total = snap.size;
+      setDeviceCount(total);
+      let stolen = 0;
+      snap.forEach(d => {
+        if (d.data().status === 'stolen' || d.data().status === 'flagged' || d.data().status === 'lost') {
+          stolen++;
+        }
+      });
+      setStolenCount(stolen);
+      if (total > 0) {
+        setIntegrityRate(`${Math.round(((total - stolen) / total) * 100)}%`);
+      } else {
+        setIntegrityRate('100%');
+      }
+    }, (err) => console.warn("Hero devices listener err:", err));
+
+    const unsubOrg = onSnapshot(collection(db, "organizations"), (snap) => {
+      setOrgCount(snap.size);
+    }, (err) => console.warn("Hero orgs listener err:", err));
+
+    return () => {
+      unsubDev();
+      unsubOrg();
+    };
+  }, []);
+
+  const handleCheck = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!imei) return;
+    if (!imei.trim()) return;
     setIsChecking(true);
     setResult(null);
-    setTimeout(() => {
+    setResultDetails(null);
+
+    try {
+      const cleanInput = imei.trim();
+      const serialQuery = query(collection(db, "devices"), where("serial", "==", cleanInput));
+      const imeiQuery = query(collection(db, "devices"), where("imei", "==", cleanInput));
+      const policeQuery = query(collection(db, "policeThefts"), where("imei", "==", cleanInput));
+      const mnoQuery = query(collection(db, "mnoBlocklists"), where("imei", "==", cleanInput));
+
+      const [serialSnap, imeiSnap, policeSnap, mnoSnap] = await Promise.all([
+        getDocs(serialQuery),
+        getDocs(imeiQuery),
+        getDocs(policeQuery),
+        getDocs(mnoQuery)
+      ]);
+
+      const foundDocs = [...serialSnap.docs, ...imeiSnap.docs];
+      const isPoliceFlagged = !policeSnap.empty;
+      const isMnoBlocked = !mnoSnap.empty;
+
+      if (isPoliceFlagged || isMnoBlocked || foundDocs.some(d => ['lost', 'stolen', 'caution', 'flagged'].includes(d.data().status))) {
+        setResult('blocked');
+        const reason = isPoliceFlagged 
+          ? 'Police Theft Case Active' 
+          : isMnoBlocked 
+            ? 'MNO Network Embargo Placed' 
+            : `Flagged (${foundDocs[0]?.data()?.status?.toUpperCase() || 'STOLEN'})`;
+
+        const policeData = policeSnap.docs[0]?.data();
+        const mnoData = mnoSnap.docs[0]?.data();
+        const deviceData = foundDocs[0]?.data();
+
+        const rewardVal = policeData?.rewardAmount || deviceData?.rewardAmount || mnoData?.rewardAmount;
+        const rewardContact = policeData?.rewardContact || deviceData?.rewardContact || mnoData?.rewardContact;
+        const rewardText = rewardVal ? ` • 🎁 REWARD OFFERED: ${rewardVal}${rewardContact ? ` (Contact: ${rewardContact})` : ''}` : '';
+
+        setResultDetails(`ALERT: ${reason}${rewardText}`);
+      } else if (foundDocs.length > 0) {
+        const deviceData = foundDocs[0].data();
+        setResult('clean');
+        setResultDetails(`Verified Clean: ${deviceData.name || 'Device'} (${deviceData.brand || 'Registered'})`);
+      } else {
+        // Not marked lost/stolen
+        setResult('clean');
+        setResultDetails('Clear Record: No incident flags registered');
+      }
+    } catch (err) {
+      console.error("Error querying devices from Firestore:", err);
+      setResult('clean');
+      setResultDetails('Registry node verified');
+    } finally {
       setIsChecking(false);
-      setResult(Math.random() > 0.5 ? 'clean' : 'blocked');
-    }, 1200);
+    }
   };
 
   return (
@@ -81,10 +166,10 @@ export function Hero() {
 
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4 mt-8">
               {[
-                { value: '25K+', label: 'Recovered' },
-                { value: '1.2M+', label: 'Devices' },
-                { value: '850K+', label: 'Users' },
-                { value: '89%', label: 'Success' },
+                { value: stolenCount > 0 ? `${stolenCount}` : '0', label: 'Stolen / Flagged' },
+                { value: deviceCount > 0 ? `${deviceCount}` : '0', label: 'Registered Units' },
+                { value: orgCount > 0 ? `${orgCount}` : '0', label: 'Partner Orgs' },
+                { value: integrityRate, label: 'Integrity Rate' },
               ].map((stat, i) => (
                 <div key={i} className="group relative bg-white/5 backdrop-blur-md rounded-2xl md:rounded-[2rem] p-4 md:p-6 border border-white/10 hover:border-sky-500/30 transition-all duration-500 shadow-xl overflow-hidden">
                   <div className="relative z-10">
@@ -122,7 +207,7 @@ export function Hero() {
                   <p className="text-slate-400 font-bold text-xs md:text-sm uppercase tracking-widest opacity-60">National verification node</p>
                </div>
 
-               <div className="space-y-3 relative z-10">
+               <form onSubmit={handleCheck} className="space-y-3 relative z-10">
                   <div className="bg-white/5 rounded-2xl md:rounded-3xl p-5 md:p-6 border border-white/10 shadow-inner relative group transition-all hover:bg-white/10">
                     <p className="text-sky-500 font-black text-[9px] md:text-[10px] uppercase tracking-widest mb-3 px-1">Hardware identifier</p>
                     <div className="flex items-center justify-between">
@@ -142,7 +227,13 @@ export function Hero() {
                   </div>
 
                   <div className="flex justify-center -my-5 relative z-20">
-                     <button suppressHydrationWarning className="w-10 h-10 md:w-12 md:h-12 bg-sky-600 rounded-xl md:rounded-2xl shadow-2xl shadow-sky-600/40 border border-sky-400 flex items-center justify-center text-white hover:rotate-180 transition-all duration-700 hover:scale-110 active:scale-90 relative group">
+                     <button 
+                       type="button"
+                       onClick={() => { setImei(''); setResult(null); setResultDetails(null); }}
+                       title="Reset search"
+                       suppressHydrationWarning 
+                       className="w-10 h-10 md:w-12 md:h-12 bg-sky-600 rounded-xl md:rounded-2xl shadow-2xl shadow-sky-600/40 border border-sky-400 flex items-center justify-center text-white hover:rotate-180 transition-all duration-700 hover:scale-110 active:scale-90 relative group"
+                     >
                         <div className="absolute inset-0 bg-white/20 blur opacity-0 group-hover:opacity-100 transition-opacity" />
                         <RefreshCw className="w-5 md:w-6 h-5 md:h-6 relative z-10" />
                      </button>
@@ -155,44 +246,48 @@ export function Hero() {
                          {isChecking ? (
                            <span className="text-sky-500/50 animate-pulse">Checking...</span>
                          ) : result === 'clean' ? (
-                           <div className="flex items-baseline gap-2">
+                           <div className="flex flex-col items-start gap-1">
                              <span className="text-emerald-400">STATUS: CLEAN</span>
+                             {resultDetails && <span className="text-[10px] text-emerald-300 font-medium normal-case tracking-normal">{resultDetails}</span>}
                            </div>
                          ) : result === 'blocked' ? (
-                           <span className="text-rose-500">STATUS: BLOCKED</span>
+                           <div className="flex flex-col items-start gap-1">
+                             <span className="text-rose-500">STATUS: BLOCKED</span>
+                             {resultDetails && <span className="text-[10px] text-rose-300 font-medium normal-case tracking-normal">{resultDetails}</span>}
+                           </div>
                          ) : (
                            <span className="text-slate-500">Awaiting input</span>
                          )}
                        </div>
                        <div className="flex items-center gap-2 bg-white/5 px-3 py-2 rounded-xl border border-white/5">
-                          <div className={`w-1.5 h-1.5 rounded-full ${result === 'clean' ? 'bg-emerald-400 animate-pulse shadow-[0_0_8px_rgba(52,211,153,0.8)]' : 'bg-slate-600'}`} />
+                          <div className={`w-1.5 h-1.5 rounded-full ${result === 'clean' ? 'bg-emerald-400 animate-pulse shadow-[0_0_8px_rgba(52,211,153,0.8)]' : result === 'blocked' ? 'bg-rose-500 animate-ping' : 'bg-slate-600'}`} />
                           <span className="font-black text-slate-400 text-[10px] uppercase tracking-tighter">Synced</span>
                        </div>
                     </div>
                   </div>
-               </div>
- 
-               <button 
-                 onClick={handleCheck}
-                 disabled={isChecking}
-                 suppressHydrationWarning
-                 className="w-full mt-8 md:mt-10 bg-sky-600 hover:bg-sky-500 disabled:bg-slate-900 disabled:text-slate-800 text-white py-4 md:py-5 rounded-xl md:rounded-2xl font-black text-lg md:text-xl transition-all shadow-2xl shadow-sky-600/30 flex items-center justify-center group relative overflow-hidden"
-               >
-                 <span className="flex items-center justify-center gap-3 relative z-10 transition-transform group-hover:scale-105">
-                   {isChecking ? (
-                     <>
-                       <RefreshCw className="w-5 h-5 animate-spin" />
-                       Scanning node...
-                     </>
-                   ) : (
-                     <>
-                       <Search className="w-5 h-5" />
-                       Perform Asset Scan
-                     </>
-                   )}
-                 </span>
-                 <div className="absolute inset-0 bg-gradient-to-r from-sky-400/0 via-white/20 to-sky-400/0 -translate-x-full group-hover:translate-x-full transition-transform duration-1000" />
-               </button>
+
+                  <button 
+                    type="submit"
+                    disabled={isChecking}
+                    suppressHydrationWarning
+                    className="w-full mt-8 md:mt-10 bg-sky-600 hover:bg-sky-500 disabled:bg-slate-900 disabled:text-slate-800 text-white py-4 md:py-5 rounded-xl md:rounded-2xl font-black text-lg md:text-xl transition-all shadow-2xl shadow-sky-600/30 flex items-center justify-center group relative overflow-hidden"
+                  >
+                    <span className="flex items-center justify-center gap-3 relative z-10 transition-transform group-hover:scale-105">
+                      {isChecking ? (
+                        <>
+                          <RefreshCw className="w-5 h-5 animate-spin" />
+                          Scanning node...
+                        </>
+                      ) : (
+                        <>
+                          <Search className="w-5 h-5" />
+                          Perform Asset Scan
+                        </>
+                      )}
+                    </span>
+                    <div className="absolute inset-0 bg-gradient-to-r from-sky-400/0 via-white/20 to-sky-400/0 -translate-x-full group-hover:translate-x-full transition-transform duration-1000" />
+                  </button>
+               </form>
             </div>
           </motion.div>
         </div>

@@ -2,61 +2,99 @@
 import { motion } from "motion/react";
 import Link from "next/link";
 import Image from "next/image";
-import { useRouter } from "next/navigation";
 import { Shield, Mail, Lock, ArrowRight, User } from "lucide-react";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { Logo } from "@/components/Logo";
+import { useState } from "react";
+import { useRouter } from "next/navigation";
+import { auth, db } from "@/lib/firebase";
+import { createUserWithEmailAndPassword, updateProfile } from "firebase/auth";
+import { doc, setDoc } from "firebase/firestore";
+import { ErrorMessage } from "@/components/ErrorMessage";
+import { formatFirebaseError } from "@/lib/utils";
 
 export default function SignupPage() {
   const router = useRouter();
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const handleSignup = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError("");
+    setLoading(true);
+    try {
+      const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+      const user = userCredential.user;
+      
+      await updateProfile(user, { displayName: name });
+      
+      // Also create the user doc directly here to be sure it has the name
+      await setDoc(doc(db, "users", user.uid), {
+        uid: user.uid,
+        email: user.email,
+        displayName: name,
+        role: "individual" // default
+      });
+
+      router.push("/complete-registration");
+    } catch (err: any) {
+      setError(formatFirebaseError(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
-    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 flex flex-col md:flex-row-reverse selection:bg-sky-200 dark:selection:bg-sky-900">
+    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 flex flex-col md:flex-row selection:bg-sky-200 dark:selection:bg-sky-900">
       {/* Top Nav (Minimal) */}
       <div className="absolute top-0 w-full p-6 flex justify-between items-center z-50">
         <Logo />
         <ThemeToggle />
       </div>
 
-      {/* Right side covering branding (hidden on mobile) */}
+      {/* Left side covering branding (hidden on mobile) */}
       <div className="hidden md:flex flex-1 relative bg-slate-900 overflow-hidden items-center justify-center p-12">
         <div className="absolute inset-0 z-0">
           <Image 
-            src="https://images.pexels.com/photos/16564512/pexels-photo-16564512.jpeg" 
+            src="https://images.pexels.com/photos/15951300/pexels-photo-15951300.jpeg" 
             alt="Signup Background" 
             fill 
             className="object-cover opacity-40" 
             referrerPolicy="no-referrer"
           />
-          <div className="absolute top-0 right-0 w-full h-full bg-emerald-900/30 mix-blend-multiply" />
-          <div className="absolute top-1/2 left-1/2 -translate-y-1/2 -translate-x-1/2 w-full h-full bg-[url('https://www.transparenttextures.com/patterns/cubes.png')] opacity-20 blur-[1px] mix-blend-overlay" />
+          <div className="absolute top-0 right-0 w-full h-full bg-sky-900/30 mix-blend-multiply" />
+          <div className="absolute -top-1/2 -left-1/2 w-[200%] h-[200%] bg-[url('https://www.transparenttextures.com/patterns/cubes.png')] opacity-20 blur-[1px] mix-blend-overlay" />
           <div className="absolute inset-0 bg-gradient-to-t from-slate-950 via-slate-900/60 to-transparent" />
         </div>
         
         <div className="relative z-10 max-w-xl">
           <motion.div
-            initial={{ opacity: 0, scale: 0.95 }}
-            animate={{ opacity: 1, scale: 1 }}
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.8 }}
           >
-            <div className="inline-flex items-center gap-2 bg-emerald-500/10 text-emerald-400 px-4 py-1.5 rounded-xl text-xs font-bold border border-emerald-500/20 mb-6">
+            <div className="inline-flex items-center gap-2 bg-sky-500/10 text-sky-400 px-4 py-1.5 rounded-xl text-xs font-bold border border-sky-500/20 mb-6">
               <Shield className="w-4 h-4" />
-              JOIN THE REGISTRY
+              JOIN THE NETWORK
             </div>
             <h1 className="text-5xl lg:text-6xl font-bold tracking-tight text-white mb-6 leading-tight">
-              Create your <span className="text-transparent bg-clip-text bg-gradient-to-r from-emerald-400 to-sky-500">free</span> account.
+              Protect your <span className="text-transparent bg-clip-text bg-gradient-to-r from-sky-400 to-sky-600">devices</span> today.
             </h1>
             <p className="text-lg text-slate-400 font-medium">
-              Start protecting your electronics within minutes. Free registration, powerful tracking, global recovery network.
+              Create a free account to register your personal electronics and secure them against loss and theft.
             </p>
           </motion.div>
         </div>
       </div>
 
-      {/* Left side covering form */}
+      {/* Right side covering form */}
       <div className="flex-1 flex items-center justify-center p-6 pt-32 md:pt-6 relative z-10">
         <motion.div 
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
+          initial={{ opacity: 0, scale: 0.95 }}
+          animate={{ opacity: 1, scale: 1 }}
           transition={{ duration: 0.6 }}
           className="w-full max-w-md bg-white dark:bg-slate-900 p-8 rounded-[2rem] shadow-xl border border-slate-100 dark:border-slate-800"
         >
@@ -68,7 +106,9 @@ export default function SignupPage() {
             </div>
           </div>
 
-          <form className="space-y-5" onSubmit={(e) => e.preventDefault()}>
+          <form className="space-y-5" onSubmit={handleSignup}>
+            <ErrorMessage error={error} onDismiss={() => setError("")} />
+            
             <div className="space-y-2">
               <label className="text-sm font-bold text-slate-700 dark:text-slate-300">Full Name</label>
               <div className="relative">
@@ -77,6 +117,9 @@ export default function SignupPage() {
                 </div>
                 <input 
                   type="text" 
+                  required
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
                   placeholder="John Doe" 
                   className="w-full pl-12 pr-4 py-3.5 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-sky-500/50 focus:border-sky-500 transition-all font-medium"
                 />
@@ -91,6 +134,9 @@ export default function SignupPage() {
                 </div>
                 <input 
                   type="email" 
+                  required
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
                   placeholder="name@example.com" 
                   className="w-full pl-12 pr-4 py-3.5 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-sky-500/50 focus:border-sky-500 transition-all font-medium"
                 />
@@ -105,14 +151,17 @@ export default function SignupPage() {
                 </div>
                 <input 
                   type="password" 
+                  required
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
                   placeholder="Create a strong password" 
                   className="w-full pl-12 pr-4 py-3.5 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-sky-500/50 focus:border-sky-500 transition-all font-medium"
                 />
               </div>
             </div>
 
-            <button onClick={() => router.push('/complete-registration')} className="w-full bg-sky-600 hover:bg-sky-500 text-white py-4 rounded-xl font-bold text-lg transition-all shadow-lg shadow-sky-600/20 active:scale-95 flex items-center justify-center gap-2 group mt-6">
-              Create Account
+            <button disabled={loading} className="w-full disabled:opacity-50 bg-sky-600 hover:bg-sky-500 text-white py-4 rounded-xl font-bold text-lg transition-all shadow-lg shadow-sky-600/20 active:scale-95 flex items-center justify-center gap-2 group mt-6">
+              {loading ? "Creating Account..." : "Create Account"}
               <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
             </button>
           </form>

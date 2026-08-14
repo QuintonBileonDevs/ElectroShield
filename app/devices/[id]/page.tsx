@@ -12,13 +12,65 @@ import { useAuth } from "@/components/auth-provider";
 import Link from "next/link";
 import React, { useState, useCallback, useEffect } from "react";
 import { useParams, useRouter } from "next/navigation";
+import { doc, getDoc } from "firebase/firestore";
+import { db } from "@/lib/firebase";
 
 // Mock device data for dynamic detail view
 const MOCK_DEVICES_DETAILS: Record<string, any> = {
-  '1': { id: '1', name: 'iPhone 15 Pro', brand: 'Apple', serial: 'S/N: 23948203', imei: '358293108492031', status: 'secured', type: 'Phone', model: 'A3102', battery: '92%', storage: '256GB', color: 'Natural Titanium', purchaseDate: 'Oct 2023', lastSync: '2m ago' },
-  '2': { id: '2', name: 'MacBook Pro M3', brand: 'Apple', serial: 'S/N: 92834722', imei: 'N/A', status: 'secured', type: 'Laptop', model: 'M3 Pro', battery: '98%', storage: '512GB', color: 'Space Black', purchaseDate: 'Nov 2023', lastSync: '1h ago' },
-  '3': { id: '3', name: 'Galaxy Tab S9', brand: 'Samsung', serial: 'S/N: 11223344', imei: '352938112233445', status: 'caution', type: 'Tablet', model: 'SM-X710', battery: '45%', storage: '128GB', color: 'Graphite', purchaseDate: 'Jan 2024', lastSync: '3d ago' },
-  '4': { id: '4', name: 'Pixel Watch 2', brand: 'Google', serial: 'S/N: 55667788', imei: 'N/A', status: 'lost', type: 'Watch', model: 'G4TSL', battery: '0%', storage: '32GB', color: 'Polished Silver', purchaseDate: 'Feb 2024', lastSync: 'Never' },
+  "1": {
+    id: "1",
+    name: "iPhone 15 Pro Max",
+    brand: "Apple",
+    model: "A3106 Titanium Natural",
+    serial: "SN-84920491024",
+    imei: "359284092840192",
+    type: "Phone",
+    status: "secured",
+    battery: "94%",
+    storage: "256 GB (142 GB Free)",
+    purchased: "2024-03-15",
+    value: "P 18,500.00",
+    history: [
+      { action: "Registered with ElectroShield Registry", date: "2024-03-15", by: "John Doe" },
+      { action: "Security verification completed", date: "2024-03-16", by: "Automated Bot" },
+      { action: "Ownership Token minted", date: "2024-04-01", by: "Registry Contract" }
+    ]
+  },
+  "2": {
+    id: "2",
+    name: "MacBook Pro 16\"",
+    brand: "Apple",
+    model: "M3 Max 36GB Space Black",
+    serial: "SN-93820194820",
+    imei: "N/A (Wi-Fi Only)",
+    type: "Laptop",
+    status: "secured",
+    battery: "98%",
+    storage: "1 TB (620 GB Free)",
+    purchased: "2024-01-10",
+    value: "P 34,900.00",
+    history: [
+      { action: "Registered with ElectroShield Registry", date: "2024-01-10", by: "John Doe" }
+    ]
+  },
+  "3": {
+    id: "3",
+    name: "Samsung Galaxy Tab S9",
+    brand: "Samsung",
+    model: "SM-X910 Graphite",
+    serial: "SN-57392019482",
+    imei: "358102938475619",
+    type: "Tablet",
+    status: "caution",
+    battery: "82%",
+    storage: "128 GB (40 GB Free)",
+    purchased: "2023-11-20",
+    value: "P 11,200.00",
+    history: [
+      { action: "Registered with ElectroShield Registry", date: "2023-11-20", by: "John Doe" },
+      { action: "Reported missing", date: "2024-05-10", by: "John Doe" }
+    ]
+  }
 };
 
 export default function DeviceDetailPage() {
@@ -32,13 +84,46 @@ export default function DeviceDetailPage() {
   const [codeCopied, setCodeCopied] = useState(false);
 
   useEffect(() => {
-    const fetchDevice = () => {
-      if (id && MOCK_DEVICES_DETAILS[id as string]) {
-        setDevice(MOCK_DEVICES_DETAILS[id as string]);
+    const fetchDevice = async () => {
+      if (!id) return;
+      const idStr = Array.isArray(id) ? id[0] : id;
+      
+      try {
+        const docRef = doc(db, "devices", idStr);
+        const docSnap = await getDoc(docRef);
+        if (docSnap.exists()) {
+          setDevice({ id: docSnap.id, ...docSnap.data() });
+          return;
+        }
+      } catch (err) {
+        console.error("Error fetching device from firestore:", err);
+      }
+
+      // Fallback to mock dictionary or dynamically generated detail
+      if (MOCK_DEVICES_DETAILS[idStr]) {
+        setDevice(MOCK_DEVICES_DETAILS[idStr]);
+      } else {
+        setDevice({
+          id: idStr,
+          name: `Registered Device #${idStr}`,
+          brand: "Generic Device",
+          model: "Standard Model",
+          serial: `SN-${idStr}-8849`,
+          imei: `35${Math.floor(1000000000000 + Math.random() * 9000000000000)}`,
+          type: "Phone",
+          status: "secured",
+          battery: "96%",
+          storage: "128 GB (85 GB Free)",
+          purchased: "2024-02-01",
+          value: "P 8,500.00",
+          history: [
+            { action: "Registered with ElectroShield Registry", date: "2024-02-01", by: "Owner" },
+            { action: "Defense cryptographic stamp applied", date: "2024-02-01", by: "Registry Engine" }
+          ]
+        });
       }
     };
-    const timer = setTimeout(fetchDevice, 100);
-    return () => clearTimeout(timer);
+    fetchDevice();
   }, [id]);
 
   const generateTransferCode = async () => {

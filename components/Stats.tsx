@@ -1,12 +1,49 @@
 'use client';
+import { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
+import { collection, onSnapshot } from 'firebase/firestore';
+import { db } from '@/lib/firebase';
 
 export function Stats() {
+  const [deviceCount, setDeviceCount] = useState<number>(0);
+  const [stolenCount, setStolenCount] = useState<number>(0);
+  const [orgCount, setOrgCount] = useState<number>(0);
+  const [activeRate, setActiveRate] = useState<string>('100%');
+
+  useEffect(() => {
+    const unsubDevices = onSnapshot(collection(db, "devices"), (snap) => {
+      const total = snap.size;
+      setDeviceCount(total);
+      let stolen = 0;
+      snap.forEach(d => {
+        if (d.data().status === 'stolen' || d.data().status === 'flagged') {
+          stolen++;
+        }
+      });
+      setStolenCount(stolen);
+      if (total > 0) {
+        const cleanRate = Math.round(((total - stolen) / total) * 100);
+        setActiveRate(`${cleanRate}%`);
+      } else {
+        setActiveRate('100%');
+      }
+    }, (err) => console.warn("Stats devices listener err:", err));
+
+    const unsubOrgs = onSnapshot(collection(db, "organizations"), (snap) => {
+      setOrgCount(snap.size);
+    }, (err) => console.warn("Stats orgs listener err:", err));
+
+    return () => {
+      unsubDevices();
+      unsubOrgs();
+    };
+  }, []);
+
   const stats = [
-    { value: '25K+', label: 'Recovered', color: 'text-sky-600 dark:text-sky-400' },
-    { value: '1.2M+', label: 'Total Devices', color: 'text-indigo-600 dark:text-indigo-400' },
-    { value: '850K+', label: 'Active Users', color: 'text-sky-700 dark:text-sky-400' },
-    { value: '89%', label: 'Recovery Rate', color: 'text-sky-600 dark:text-sky-400' },
+    { value: deviceCount > 0 ? `${deviceCount}` : '0', label: 'Registered Devices', color: 'text-sky-600 dark:text-sky-400' },
+    { value: stolenCount > 0 ? `${stolenCount}` : '0', label: 'Flagged / Stolen Alerts', color: 'text-rose-600 dark:text-rose-400' },
+    { value: orgCount > 0 ? `${orgCount}` : '0', label: 'Authorized Organizations', color: 'text-indigo-600 dark:text-indigo-400' },
+    { value: activeRate, label: 'Registry Integrity Rate', color: 'text-emerald-600 dark:text-emerald-400' },
   ];
 
   return (

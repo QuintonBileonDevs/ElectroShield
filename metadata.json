@@ -2,5 +2,5 @@
   "name": "ElectroShield v1.1",
   "description": "Device Registry & Asset Monitoring App",
   "requestFramePermissions": [],
-  "majorCapabilities": []
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

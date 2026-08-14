@@ -5,8 +5,34 @@ import Image from "next/image";
 import { Shield, Mail, Lock, ArrowRight, User } from "lucide-react";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { Logo } from "@/components/Logo";
+import { useState } from "react";
+import { auth } from "@/lib/firebase";
+import { signInWithEmailAndPassword } from "firebase/auth";
+import { useRouter } from "next/navigation";
+import { ErrorMessage } from "@/components/ErrorMessage";
+import { formatFirebaseError } from "@/lib/utils";
 
 export default function LoginPage() {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+  const router = useRouter();
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError("");
+    setLoading(true);
+    try {
+      await signInWithEmailAndPassword(auth, email, password);
+      router.push("/dashboard");
+    } catch (err: any) {
+      setError(formatFirebaseError(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-950 flex flex-col md:flex-row selection:bg-sky-200 dark:selection:bg-sky-900">
       {/* Top Nav (Minimal) */}
@@ -63,7 +89,8 @@ export default function LoginPage() {
             <p className="text-slate-500 dark:text-slate-400 text-sm">Enter your credentials to access your account.</p>
           </div>
 
-          <form className="space-y-5" onSubmit={(e) => e.preventDefault()}>
+          <form className="space-y-5" onSubmit={handleLogin}>
+            <ErrorMessage error={error} onDismiss={() => setError("")} />
             <div className="space-y-2">
               <label className="text-sm font-bold text-slate-700 dark:text-slate-300">Email Address</label>
               <div className="relative">
@@ -72,6 +99,9 @@ export default function LoginPage() {
                 </div>
                 <input 
                   type="email" 
+                  required
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
                   placeholder="name@example.com" 
                   className="w-full pl-12 pr-4 py-3.5 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-sky-500/50 focus:border-sky-500 transition-all font-medium"
                 />
@@ -89,14 +119,17 @@ export default function LoginPage() {
                 </div>
                 <input 
                   type="password" 
+                  required
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
                   placeholder="••••••••" 
                   className="w-full pl-12 pr-4 py-3.5 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-sky-500/50 focus:border-sky-500 transition-all font-medium"
                 />
               </div>
             </div>
 
-            <button className="w-full bg-sky-600 hover:bg-sky-500 text-white py-4 rounded-xl font-bold text-lg transition-all shadow-lg shadow-sky-600/20 active:scale-95 flex items-center justify-center gap-2 group mt-6">
-              Sign In
+            <button disabled={loading} className="w-full bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white py-4 rounded-xl font-bold text-lg transition-all shadow-lg shadow-sky-600/20 active:scale-95 flex items-center justify-center gap-2 group mt-6">
+              {loading ? "Signing In..." : "Sign In"}
               <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
             </button>
           </form>

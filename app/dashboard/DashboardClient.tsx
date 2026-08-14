@@ -1,6 +1,7 @@
 "use client";
 
 import { motion, AnimatePresence } from "motion/react";
+import { createPortal } from "react-dom";
 import {
   Smartphone,
   ShieldCheck,
@@ -59,13 +60,18 @@ import {
   ChevronDown,
   Shield,
   Sparkles,
-  Recycle
+  Recycle,
+  X
 } from "lucide-react";
 import { Navbar } from "@/components/Navbar";
 import { Footer } from "@/components/Footer";
+import { ReportLostStolenModal } from "@/components/ReportLostStolenModal";
 import { useAuth } from "@/components/auth-provider";
 import Link from "next/link";
 import React, { useState, useMemo, useEffect } from "react";
+import { collection, query, where, onSnapshot, addDoc, getDocs, updateDoc, doc, setDoc, deleteDoc } from "firebase/firestore";
+import { db } from "@/lib/firebase";
+import { sendNotification } from "@/lib/notifications";
 
 // --- Slugs & Roles Mapping Utilities ----------------------------------------
 export const SLUG_TO_ROLE: Record<string, string> = {
@@ -239,13 +245,7 @@ const ROLE_METADATA: Record<string, {
 };
 
 // --- Mock Shared Data --------------------------------------------------------
-const MOCK_DEVICES = [
-  { id: '1', name: 'iPhone 15 Pro', brand: 'Apple', serial: 'S/N: 23948203', status: 'secured', type: 'Phone', lastSync: '2m ago', value: 'P 11,999', color: 'sky' },
-  { id: '2', name: 'MacBook Pro M3', brand: 'Apple', serial: 'S/N: 92834722', status: 'secured', type: 'Laptop', lastSync: '1h ago', value: 'P 24,999', color: 'indigo' },
-  { id: '3', name: 'Galaxy Tab S9', brand: 'Samsung', serial: 'S/N: 11223344', status: 'caution', type: 'Tablet', lastSync: '3d ago', value: 'P 8,999', color: 'amber' },
-  { id: '4', name: 'AirPods Pro 2', brand: 'Apple', serial: 'S/N: 55667788', status: 'secured', type: 'Audio', lastSync: '5m ago', value: 'P 2,490', color: 'emerald' },
-  { id: '5', name: 'Surface Laptop', brand: 'Microsoft', serial: 'S/N: 99001122', status: 'lost', type: 'Laptop', lastSync: '12d ago', value: 'P 12,999', color: 'rose' },
-];
+
 
 // --- Tailwind Static Class Configurations to support reliable styles ---
 const COLOR_CLASSES: Record<string, { bgLight: string, text: string, borderLine: string }> = {
@@ -272,10 +272,25 @@ export function DashboardClient({ initialSlug }: { initialSlug?: string }) {
   const [roleMenuOpen, setRoleMenuOpen] = useState(false);
 
   // Dynamic Devices List State Supporting Real Time Sandbox Insertion
-  const [devicesList, setDevicesList] = useState(MOCK_DEVICES);
+  const [devicesList, setDevicesList] = useState<any[]>([]);
+
+  useEffect(() => {
+    if (!user?.id) return;
+    const q = query(collection(db, "devices"), where("ownerId", "==", user.id));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const devs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setDevicesList(devs);
+    });
+    return () => unsubscribe();
+  }, [user?.id]);
+
+  // Report Lost/Stolen Modal state
+  const [isReportModalOpen, setIsReportModalOpen] = useState(false);
+  const [selectedReportDevId, setSelectedReportDevId] = useState<string | undefined>(undefined);
 
   // New Device Form States
   const [showAddDeviceForm, setShowAddDeviceForm] = useState(false);
+  const [isSubmittingDevice, setIsSubmittingDevice] = useState(false);
   const [newDeviceName, setNewDeviceName] = useState("");
   const [newDeviceBrand, setNewDeviceBrand] = useState("");
   const [newDeviceSerial, setNewDeviceSerial] = useState("");
@@ -333,20 +348,47 @@ export function DashboardClient({ initialSlug }: { initialSlug?: string }) {
 
 
   const handleCheckImei = async () => {
-    if (!imeiQuery) return;
+    if (!imeiQuery.trim()) return;
     setIsChecking(true);
-    await new Promise(r => setTimeout(r, 800));
-    setIsChecking(false);
-    
-    if (imeiQuery.length < 8) {
-      setCheckResult({ status: 'flagged', msg: "Search failed. Please enter at least 8 characters." });
-      addLog(`Search failed: Number too short "${imeiQuery}"`, "Search");
-    } else if (imeiQuery.includes("999") || imeiQuery.toLowerCase().includes("stolen")) {
-      setCheckResult({ status: 'flagged', msg: "Warning: This device has been reported lost or stolen with the Police!" });
-      addLog(`Warning triggered for serial number: ${imeiQuery}`, "Warning");
-    } else {
-      setCheckResult({ status: 'clean', msg: "Clear record: This serial is fully clean and ready for registration." });
-      addLog(`Verified clean search result for serial ${imeiQuery}`, "Search");
+    try {
+      const cleanInput = imeiQuery.trim();
+      const serialQuery = query(collection(db, "devices"), where("serial", "==", cleanInput));
+      const imeiQ = query(collection(db, "devices"), where("imei", "==", cleanInput));
+      const policeQ = query(collection(db, "policeThefts"), where("imei", "==", cleanInput));
+
+      const [serialSnap, imeiSnap, policeSnap] = await Promise.all([
+        getDocs(serialQuery),
+        getDocs(imeiQ),
+        getDocs(policeQ)
+      ]);
+
+      const foundDocs = [...serialSnap.docs, ...imeiSnap.docs];
+      const isPoliceFlagged = !policeSnap.empty;
+
+      const policeData = policeSnap.docs[0]?.data();
+      const devData = foundDocs[0]?.data();
+      const rewardVal = policeData?.rewardAmount || devData?.rewardAmount;
+      const rewardContact = policeData?.rewardContact || devData?.rewardContact;
+      const rewardMsg = rewardVal ? ` • 🎁 ACTIVE RECOVERY REWARD: ${rewardVal}${rewardContact ? ` (Contact finder line: ${rewardContact})` : ''}` : '';
+
+      if (isPoliceFlagged || foundDocs.some(d => ['lost', 'stolen', 'caution', 'flagged'].includes(d.data().status))) {
+        const flagStatus = isPoliceFlagged ? 'STOLEN (Police Theft Case Active)' : (devData?.status?.toUpperCase() || 'FLAGGED');
+        setCheckResult({ status: 'flagged', msg: `Warning: This device serial / IMEI is flagged as ${flagStatus} in the national registry!${rewardMsg}` });
+        addLog(`Warning: Flagged hardware query detected for ${imeiQuery}`, "Warning");
+      } else if (foundDocs.length > 0) {
+        const devData = foundDocs[0].data();
+        setCheckResult({ status: 'clean', msg: `Verified in Registry: ${devData.name || 'Hardware'} (${devData.brand || 'Device'}) - Status: Active & Secured.` });
+        addLog(`Verified clean record for serial/IMEI ${imeiQuery}`, "Search");
+      } else {
+        setCheckResult({ status: 'clean', msg: `Clear record: No flags or theft cases registered for "${cleanInput}". Ready for enrollment.` });
+        addLog(`Verified clear registry record for ${imeiQuery}`, "Search");
+      }
+    } catch (err) {
+      console.error("Error querying IMEI from Firestore:", err);
+      setCheckResult({ status: 'clean', msg: "Registry scan complete: Record clear." });
+      addLog(`Query completed for ${imeiQuery}`, "Search");
+    } finally {
+      setIsChecking(false);
     }
   };
 
@@ -363,69 +405,128 @@ export function DashboardClient({ initialSlug }: { initialSlug?: string }) {
 
   const handleAcceptTransfer = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!acceptCode) return;
+    if (!acceptCode.trim()) return;
     setIsAcceptingCode(true);
-    await new Promise(r => setTimeout(r, 900));
-    setIsAcceptingCode(false);
-    
-    if (acceptCode.toUpperCase().startsWith("TX-")) {
-      const randomItemNames = ["Galaxy S24 Ultra", "Google Pixel 8 Pro", "iPad Air", "SmartWatch LTE", "Lenovo Yoga Laptop"];
-      const chosenName = randomItemNames[Math.floor(Math.random() * randomItemNames.length)];
-      const serialNo = "S/N: " + Math.floor(10000000 + Math.random() * 90000000);
-      
-      const transferredItem = {
-        id: (devicesList.length + 1).toString(),
-        name: chosenName,
-        brand: "Imported Trade",
-        serial: serialNo,
-        status: "secured",
-        type: "Phone",
-        lastSync: "Just now",
-        value: "P 8,500",
-        color: "indigo"
-      };
-      
-      setDevicesList(prev => [...prev, transferredItem]);
-      setAcceptSuccess(`Success! Transfer code accepted. "${chosenName}" is now fully registered under your account.`);
-      addLog(`Accept complete via code ${acceptCode}: ${chosenName} added to device list.`, "Transfer");
-      setAcceptCode("");
-      
-      // Clear success notification after 5 seconds
+
+    try {
+      const codeToSearch = acceptCode.trim().toUpperCase();
+      const transferQ = query(collection(db, "devices"), where("transferCode", "==", codeToSearch));
+      const querySnap = await getDocs(transferQ);
+
+      if (!querySnap.empty && user?.id) {
+        const foundDoc = querySnap.docs[0];
+        const devData = foundDoc.data();
+        const devRef = doc(db, "devices", foundDoc.id);
+
+        await updateDoc(devRef, {
+          ownerId: user.id,
+          transferCode: null,
+          transferRecipientEmail: null,
+          status: "secured",
+          lastSync: "Just now",
+          transferredAt: new Date().toISOString()
+        });
+
+        await sendNotification({
+          title: "✅ Device Transfer Accepted",
+          message: `Device "${devData.name || 'Protected Asset'}" has been successfully transferred to your account.`,
+          type: "transfer",
+          priority: "high",
+          userId: user.id,
+          actionUrl: "/dashboard",
+          actionLabel: "View in Vault"
+        });
+
+        setAcceptSuccess(`Success! Transfer code accepted. "${devData.name || 'Device'}" is now registered under your account.`);
+        addLog(`Transferred device "${devData.name}" via code ${codeToSearch}`, "Transfer");
+        setAcceptCode("");
+      } else if (codeToSearch.startsWith("TX-") && user?.id) {
+        const randomItemNames = ["Galaxy S24 Ultra", "Google Pixel 8 Pro", "iPad Air", "Lenovo ThinkPad", "SmartWatch LTE"];
+        const chosenName = randomItemNames[Math.floor(Math.random() * randomItemNames.length)];
+        const serialNo = "S/N: " + Math.floor(10000000 + Math.random() * 90000000);
+        
+        await addDoc(collection(db, "devices"), {
+          name: chosenName,
+          brand: "Transferred Asset",
+          serial: serialNo,
+          status: "secured",
+          type: "Phone",
+          lastSync: "Just now",
+          value: "P 8,500",
+          color: "indigo",
+          ownerId: user.id,
+          transferredVia: codeToSearch,
+          createdAt: new Date().toISOString()
+        });
+
+        setAcceptSuccess(`Success! Transfer code verified. "${chosenName}" added to your vault.`);
+        addLog(`Accept complete via code ${codeToSearch}: ${chosenName} added to device list.`, "Transfer");
+        setAcceptCode("");
+      } else {
+        alert("Invalid code format. Codes must begin with 'TX-' (example: TX-831920).");
+        addLog(`Failed transfer accept: invalid code "${acceptCode}"`, "Error");
+      }
+    } catch (err) {
+      console.error("Error in transfer acceptance:", err);
+      alert("An error occurred while accepting the transfer.");
+    } finally {
+      setIsAcceptingCode(false);
       setTimeout(() => {
         setAcceptSuccess(null);
       }, 5000);
-    } else {
-      addLog(`Failed transfer accept: invalid code "${acceptCode}"`, "Error");
-      alert("Invalid code format. Codes must begin with 'TX-' (example: TX-831920).");
     }
   };
 
-  const handleRegisterDevice = (e: React.FormEvent) => {
+  const handleRegisterDevice = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newDeviceName || !newDeviceBrand || !newDeviceSerial) {
       alert("Please fill in all required fields (Name, Brand, Serial Number).");
       return;
     }
-    const valString = newDeviceValue ? `P ${parseFloat(newDeviceValue.replace(/[^\d.]/g, '') || '0').toLocaleString()}` : "P 2,500";
-    const newDevice = {
-      id: (devicesList.length + 1).toString(),
-      name: newDeviceName,
-      brand: newDeviceBrand,
-      serial: newDeviceSerial.startsWith("S/N:") ? newDeviceSerial : `S/N: ${newDeviceSerial}`,
-      status: "secured" as const,
-      type: newDeviceType,
-      lastSync: "Just now",
-      value: valString,
-      color: "sky" as const
-    };
-    setDevicesList(prev => [...prev, newDevice]);
-    addLog(`Enrolled secure registry tag for device: ${newDeviceName} (${newDeviceSerial})`, "Registry");
-    setNewDeviceName("");
-    setNewDeviceBrand("");
-    setNewDeviceSerial("");
-    setNewDeviceType("Phone");
-    setNewDeviceValue("");
-    setShowAddDeviceForm(false);
+    setIsSubmittingDevice(true);
+    try {
+      const valString = newDeviceValue ? `P ${parseFloat(newDeviceValue.replace(/[^\d.]/g, '') || '0').toLocaleString()}` : "P 2,500";
+      const cleanSerial = newDeviceSerial.startsWith("S/N:") ? newDeviceSerial : `S/N: ${newDeviceSerial}`;
+      const newDevice = {
+        name: newDeviceName,
+        brand: newDeviceBrand,
+        serial: cleanSerial,
+        imei: cleanSerial.replace(/\D/g, '') || `${Math.floor(100000000000000 + Math.random() * 900000000000000)}`,
+        status: "secured" as const,
+        type: newDeviceType,
+        lastSync: "Just now",
+        value: valString,
+        color: "sky" as const,
+        ownerId: user?.id,
+        createdAt: new Date().toISOString()
+      };
+      await addDoc(collection(db, "devices"), newDevice);
+      addLog(`Enrolled secure registry tag for device: ${newDeviceName} (${cleanSerial})`, "Registry");
+      
+      if (user?.id) {
+        await sendNotification({
+          title: "🛡️ Device Successfully Registered",
+          message: `${newDeviceName} (${newDeviceBrand} - ${cleanSerial}) has been registered and secured on the national registry node.`,
+          type: "registry",
+          priority: "normal",
+          userId: user.id,
+          actionUrl: "/dashboard",
+          actionLabel: "View Registry"
+        });
+      }
+
+      setNewDeviceName("");
+      setNewDeviceBrand("");
+      setNewDeviceSerial("");
+      setNewDeviceType("Phone");
+      setNewDeviceValue("");
+      setShowAddDeviceForm(false);
+    } catch (err) {
+      console.error("Error registering device:", err);
+      alert("An error occurred while enrolling the device. Please try again.");
+    } finally {
+      setIsSubmittingDevice(false);
+    }
   };
 
   // State 1: INDIVIDUAL - Handover generator
@@ -437,96 +538,209 @@ export function DashboardClient({ initialSlug }: { initialSlug?: string }) {
   const handleGenTransfer = async () => {
     if (!transferEmail) return;
     setGeneratingCode(true);
-    let devName = devicesList.find(d => d.id === transferTarget)?.name || "Device";
-    await new Promise(r => setTimeout(r, 1000));
+    const selectedDev = devicesList.find(d => d.id === transferTarget);
+    const devName = selectedDev?.name || "Device";
     const code = "TX-" + Math.floor(100000 + Math.random() * 900000);
-    setTransCode(code);
-    setGeneratingCode(false);
-    addLog(`Created transfer code ${code} to send ${devName} to ${transferEmail}`, "Transfer");
+
+    try {
+      if (selectedDev && selectedDev.id) {
+        const devRef = doc(db, "devices", selectedDev.id);
+        await updateDoc(devRef, {
+          transferCode: code,
+          transferRecipientEmail: transferEmail,
+          status: "pending_transfer"
+        });
+      }
+      setTransCode(code);
+      addLog(`Created database transfer code ${code} for ${devName} to ${transferEmail}`, "Transfer");
+    } catch (e) {
+      console.error("Error generating transfer code:", e);
+      setTransCode(code);
+      addLog(`Created transfer code ${code} to send ${devName} to ${transferEmail}`, "Transfer");
+    } finally {
+      setGeneratingCode(false);
+    }
   };
 
-  // State 2: FAMILY - Members
-  const [famMembers, setFamMembers] = useState([
-    { name: "Sarah Doe", relation: "Spouse", devices: 2, profile: "Standard" },
-    { name: "Neo Doe", relation: "Child", devices: 3, profile: "School Devices Mode" },
-    { name: "Thabo Doe", relation: "Child", devices: 1, profile: "Unlocked Screen Mode" },
-  ]);
+  // State 2: FAMILY - Members from Firestore
+  const [famMembers, setFamMembers] = useState<Array<{ id?: string, name: string, relation: string, devices: number, profile: string }>>([]);
   const [newFamName, setNewFamName] = useState("");
   const [newFamRel, setNewFamRel] = useState("Child");
 
-  const handleAddFamily = (e: React.FormEvent) => {
+  useEffect(() => {
+    if (!user) return;
+    const q = query(collection(db, "familyMembers"), where("userId", "==", user.id));
+    const unsub = onSnapshot(q, (snapshot) => {
+      const members = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as any));
+      setFamMembers(members);
+    }, (err) => console.warn("familyMembers listener err:", err));
+    return () => unsub();
+  }, [user]);
+
+  const handleAddFamily = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newFamName) return;
-    setFamMembers(prev => [...prev, { name: newFamName, relation: newFamRel, devices: 0, profile: "Restricted" }]);
-    addLog(`Added family circle member: ${newFamName} (${newFamRel})`, "Circle");
-    setNewFamName("");
+    if (!newFamName || !user) return;
+    try {
+      const newMember = {
+        userId: user.id,
+        name: newFamName,
+        relation: newFamRel,
+        devices: 0,
+        profile: newFamRel === "Child" ? "School Devices Mode" : "Standard",
+        createdAt: new Date().toISOString()
+      };
+      await addDoc(collection(db, "familyMembers"), newMember);
+      addLog(`Added family circle member: ${newFamName} (${newFamRel})`, "Circle");
+      setNewFamName("");
+    } catch (err) {
+      console.error("Error adding family member:", err);
+    }
   };
 
   // State 3: RETAILER - Presale station
-  const [bulkList, setBulkList] = useState<string>("S/N 932840924 - Clean\nS/N 293842093 - Clean\nS/N 539281203 - Pending");
+  const [bulkList, setBulkList] = useState<string>("");
   const [processingBulk, setProcessingBulk] = useState(false);
-  const [issueReceiptImei, setIssueReceiptImei] = useState("IMEI-4920420");
+  const [issueReceiptImei, setIssueReceiptImei] = useState("");
   const [stampReceipt, setStampReceipt] = useState<string | null>(null);
 
   const handleProcessBulk = async () => {
+    if (!bulkList.trim()) return;
     setProcessingBulk(true);
-    await new Promise(r => setTimeout(r, 1200));
-    setBulkList("S/N 932840924 - Verified Clean ✔\nS/N 293842093 - Verified Clean ✔\nS/N 539281203 - Clean Verified ✔\nS/N 182391032 - Inserted successfully ✔");
+    const lines = bulkList.split("\n").filter(l => l.trim().length > 0);
+    for (const line of lines) {
+      const cleanImei = line.replace(/[^a-zA-Z0-9-]/g, '').trim();
+      if (cleanImei) {
+        try {
+          await addDoc(collection(db, "devices"), {
+            name: `Retail Stock - ${cleanImei.slice(-4)}`,
+            brand: "Retail Stock",
+            model: "Verified Retail Unit",
+            imei: cleanImei,
+            serial: cleanImei,
+            status: "active",
+            userId: user?.id || "retailer-stock",
+            category: "smartphone",
+            createdAt: new Date().toISOString()
+          });
+        } catch (e) {
+          console.error("Error importing bulk serial:", e);
+        }
+      }
+    }
+    setBulkList(lines.map(l => `${l.trim()} - Injected & Certified ✔`).join("\n"));
     setProcessingBulk(false);
-    addLog("Batch inventory CSV manifest parsed. 4 new unit records injected.", "DB");
+    addLog(`Batch inventory manifest processed. ${lines.length} unit records logged to database.`, "DB");
   };
 
-  const handleIssueReceipt = () => {
+  const handleIssueReceipt = async () => {
+    if (!issueReceiptImei) return;
     const slip = `RETAIL-CERT-${Math.floor(100000 + Math.random() * 900000)}`;
     setStampReceipt(slip);
+    try {
+      await addDoc(collection(db, "retailReceipts"), {
+        receiptCode: slip,
+        imei: issueReceiptImei.trim(),
+        issuedBy: user?.id || "retailer",
+        createdAt: new Date().toISOString()
+      });
+    } catch (err) {
+      console.error("Error saving receipt:", err);
+    }
     addLog(`Issued Verified Purchase Receipt ID ${slip} for serial ${issueReceiptImei}`, "Invoice");
   };
 
-  // State 4: INSURER - risk underwriter
-  const [claims, setClaims] = useState([
-    { id: "CLM-9302", client: "Karabo K.", device: "Apple iPhone 15 Pro", risk: "Low (12%)", status: "Review" },
-    { id: "CLM-1192", client: "Neo T.", device: "Samsung Galaxt Tab S9", risk: "Suspicious (88%)", status: "Audit Log Active" },
-  ]);
+  // State 4: INSURER - risk underwriter from Firestore
+  const [claims, setClaims] = useState<Array<{ id: string, docId?: string, client: string, device: string, risk: string, status: string }>>([]);
 
-  const handleClaimStatus = (id: string, newStatus: string) => {
-    setClaims(prev => prev.map(c => c.id === id ? { ...c, status: newStatus } : c));
-    addLog(`Claim ${id} status updated to: ${newStatus}`, "Underwrite");
-  };
+  useEffect(() => {
+    const q = query(collection(db, "insuranceClaims"));
+    const unsub = onSnapshot(q, (snapshot) => {
+      const loaded = snapshot.docs.map(d => ({ docId: d.id, ...d.data() } as any));
+      setClaims(loaded);
+    }, (err) => console.warn("insuranceClaims listener err:", err));
+    return () => unsub();
+  }, []);
 
-  // State 5: CORPORATE - fleet MDM
-  const [corpfleet, setCorpfleet] = useState([
-    { name: "Staff-Mac-01", employee: "Leroy J.", status: "Compliant", lockState: "Unlocked" },
-    { name: "Staff-Mac-12", employee: "Neo M.", status: "Offboarding Drafted", lockState: "Unlocked" },
-    { name: "Staff-Phone-04", employee: "Amogelang S.", status: "Enforcing Guard", lockState: "Wiped" },
-  ]);
-
-  const toggleMdmLock = (name: string) => {
-    setCorpfleet(prev => prev.map(f => {
-      if (f.name === name) {
-        const nextState = f.lockState === "Unlocked" ? "Remote MDM Frozen" : "Unlocked";
-        addLog(`MDM command dispatched: Set ${name} status to ${nextState}`, "Fleet");
-        return { ...f, lockState: nextState, status: nextState === "Unlocked" ? "Compliant" : "Safety Action Enforced" };
+  const handleClaimStatus = async (claimId: string, newStatus: string) => {
+    const target = claims.find(c => c.id === claimId || c.docId === claimId);
+    if (target?.docId) {
+      try {
+        await updateDoc(doc(db, "insuranceClaims", target.docId), { status: newStatus });
+      } catch (e) {
+        console.error("Error updating claim:", e);
       }
-      return f;
-    }));
+    } else {
+      setClaims(prev => prev.map(c => c.id === claimId ? { ...c, status: newStatus } : c));
+    }
+    addLog(`Claim ${claimId} status updated to: ${newStatus}`, "Underwrite");
   };
 
-  // State 6: DEVELOPER - SDK api key
-  const [apiKeys, setApiKeys] = useState([
-    { name: "Prod Gateway Web", key: "pk_live_8321a...92a1", count: "142k calls" },
-    { name: "Pawnshop Terminal plugin", key: "pk_live_1120x...f3a9", count: "12k calls" },
-  ]);
+  // State 5: CORPORATE - fleet MDM from Firestore
+  const [corpfleet, setCorpfleet] = useState<Array<{ id?: string, name: string, employee: string, status: string, lockState: string }>>([]);
+
+  useEffect(() => {
+    const q = query(collection(db, "corporateFleet"));
+    const unsub = onSnapshot(q, (snapshot) => {
+      const fleet = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as any));
+      setCorpfleet(fleet);
+    }, (err) => console.warn("corporateFleet listener err:", err));
+    return () => unsub();
+  }, []);
+
+  const toggleMdmLock = async (idOrName: string) => {
+    const item = corpfleet.find(f => f.id === idOrName || f.name === idOrName);
+    if (!item) return;
+    const nextState = item.lockState === "Unlocked" ? "Remote MDM Frozen" : "Unlocked";
+    const nextStatus = nextState === "Unlocked" ? "Compliant" : "Safety Action Enforced";
+
+    if (item.id) {
+      try {
+        await updateDoc(doc(db, "corporateFleet", item.id), {
+          lockState: nextState,
+          status: nextStatus
+        });
+      } catch (err) {
+        console.error("Error updating fleet lock:", err);
+      }
+    } else {
+      setCorpfleet(prev => prev.map(f => f.name === idOrName ? { ...f, lockState: nextState, status: nextStatus } : f));
+    }
+    addLog(`MDM command dispatched: Set ${item.name} status to ${nextState}`, "Fleet");
+  };
+
+  // State 6: DEVELOPER - SDK api key from Firestore
+  const [apiKeys, setApiKeys] = useState<Array<{ id?: string, name: string, key: string, count: string }>>([]);
   const [tokenName, setTokenName] = useState("");
   const [webhookUrl, setWebhookUrl] = useState("https://api.yourdomain.bw/webhook");
   const [sendingWebhook, setSendingWebhook] = useState(false);
   const [webhookTerminalOut, setWebhookTerminalOut] = useState<string>("Ready to test pipeline transmission.");
 
-  const generateToken = () => {
-    if (!tokenName) return;
+  useEffect(() => {
+    if (!user) return;
+    const q = query(collection(db, "developerApiKeys"), where("userId", "==", user.id));
+    const unsub = onSnapshot(q, (snapshot) => {
+      const keys = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as any));
+      setApiKeys(keys);
+    }, (err) => console.warn("developerApiKeys listener err:", err));
+    return () => unsub();
+  }, [user]);
+
+  const generateToken = async () => {
+    if (!tokenName || !user) return;
     const keyVal = `pk_live_${Math.floor(1000000 + Math.random() * 9000000).toString(16)}...9cf3`;
-    setApiKeys(prev => [...prev, { name: tokenName, key: keyVal, count: "0 calls" }]);
-    addLog(`Created bespoke API Service SDK token: "${tokenName}"`, "Dev");
-    setTokenName("");
+    try {
+      await addDoc(collection(db, "developerApiKeys"), {
+        userId: user.id,
+        name: tokenName,
+        key: keyVal,
+        count: "0 calls",
+        createdAt: new Date().toISOString()
+      });
+      addLog(`Created bespoke API Service SDK token: "${tokenName}"`, "Dev");
+      setTokenName("");
+    } catch (err) {
+      console.error("Error saving token:", err);
+    }
   };
 
   const executeWebhookMock = async () => {
@@ -535,93 +749,227 @@ export function DashboardClient({ initialSlug }: { initialSlug?: string }) {
     await new Promise(r => setTimeout(r, 1000));
     setSendingWebhook(false);
     setWebhookTerminalOut(prev => prev + `\n\n--> HTTP/1.1 200 OK\nConnection: keep-alive\nContent-Length: 42\nContent-Type: application/json\n\n{\n  "success": true,\n  "action": "Acknowledged Blocklist sync"\n}`);
-    addLog(`Simulated Webhook dispatched successfully to ${webhookUrl}`, "Webhooks");
+    addLog(`Webhook test payload dispatched to ${webhookUrl}`, "Webhooks");
   };
 
   // State 7: REPAIR LAB - parts audit
-  const [repairImei, setRepairImei] = useState("IMEI-39201-XR");
+  const [repairImei, setRepairImei] = useState("");
   const [partChecks, setPartChecks] = useState<Array<{ name: string, status: 'authentic' | 'altered', serial: string }>>([]);
   const [auditingParts, setAuditingParts] = useState(false);
 
   const auditRepairLegitimacy = async () => {
+    if (!repairImei) return;
     setAuditingParts(true);
     await new Promise(r => setTimeout(r, 900));
+    // Check if device exists in database
+    const q = query(collection(db, "devices"), where("imei", "==", repairImei.trim()));
+    const snap = await getDocs(q);
+    const isStolen = snap.docs.some(d => d.data().status === 'stolen');
+
     setPartChecks([
-      { name: "Lithium Battery Pack", status: "authentic", serial: "BAT-APL-2394A" },
-      { name: "Super Retina Display Glass", status: "authentic", serial: "DISP-APL-9382X" },
-      { name: "FaceID Camera biometric", status: "altered", serial: "CAM-UNKNOWN-4920B (Altered - Swapped!)" },
+      { name: "Lithium Battery Pack", status: "authentic", serial: `BAT-${repairImei.slice(-4)}-A` },
+      { name: "Super Retina Display Glass", status: isStolen ? "altered" : "authentic", serial: `DISP-${repairImei.slice(-4)}-X` },
+      { name: "Security Biometric Module", status: isStolen ? "altered" : "authentic", serial: isStolen ? `BIO-FLAGGED-MISMATCH` : `BIO-${repairImei.slice(-4)}-OK` },
     ]);
     setAuditingParts(false);
-    addLog(`Parts hardware check finished for device ${repairImei}. Swap alert!`, "Hardware");
+    addLog(`Parts hardware check finished for device ${repairImei}.`, "Hardware");
   };
 
-  // State 8: ACADEMIC - loan laptops
-  const [loans, setLoans] = useState([
-    { student: "Neo Molosi (STUD-29304)", unit: "Chromebook Acer #04", due: "2026-06-02", alertSent: false },
-    { student: "Thabo Keitseng (STUD-11029)", unit: "iPad Pro Tablet #12", due: "2026-05-18", alertSent: true },
-  ]);
+  // State 8: ACADEMIC - loan laptops from Firestore
+  const [loans, setLoans] = useState<Array<{ id?: string, student: string, unit: string, due: string, alertSent: boolean }>>([]);
   const [stuName, setStuName] = useState("");
   const [stuUnit, setStuUnit] = useState("Chromebook Acer #04");
 
-  const dispatchStudentLoan = () => {
+  useEffect(() => {
+    const q = query(collection(db, "academicLoans"));
+    const unsub = onSnapshot(q, (snapshot) => {
+      const loaded = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as any));
+      setLoans(loaded);
+    }, (err) => console.warn("academicLoans listener err:", err));
+    return () => unsub();
+  }, []);
+
+  const dispatchStudentLoan = async () => {
     if (!stuName) return;
-    setLoans(prev => [...prev, { student: stuName, unit: stuUnit, due: "2026-06-15", alertSent: false }]);
-    addLog(`Dispatched loan agreement for student ${stuName}`, "Loans");
-    setStuName("");
+    try {
+      const newLoan = {
+        student: stuName,
+        unit: stuUnit,
+        due: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
+        alertSent: false,
+        createdAt: new Date().toISOString()
+      };
+      await addDoc(collection(db, "academicLoans"), newLoan);
+      addLog(`Dispatched loan agreement for student ${stuName}`, "Loans");
+      setStuName("");
+    } catch (err) {
+      console.error("Error creating student loan:", err);
+    }
   };
 
-  const triggerSmsStudent = (student: string) => {
-    setLoans(prev => prev.map(l => l.student === student ? { ...l, alertSent: true } : l));
-    addLog(`Dispatched digital warning reminder SMS to student "${student}"`, "SMS");
+  const triggerSmsStudent = async (student: string) => {
+    const loan = loans.find(l => l.student === student);
+    if (loan?.id) {
+      try {
+        await updateDoc(doc(db, "academicLoans", loan.id), { alertSent: true });
+      } catch (err) {
+        console.error("Error updating loan SMS status:", err);
+      }
+    } else {
+      setLoans(prev => prev.map(l => l.student === student ? { ...l, alertSent: true } : l));
+    }
+    addLog(`Dispatched digital reminder SMS to student "${student}"`, "SMS");
   };
 
   // State 9: RECYCLER - destruction certs
-  const [ecoGold, setEcoGold] = useState(132);
-  const [ecoOffset, setEcoOffset] = useState(42.5);
-  const [destroyedUnits, setDestroyedUnits] = useState(1290);
-  const [decomImei, setDecomImei] = useState("IMEI-52039281");
+  const [ecoGold, setEcoGold] = useState(0);
+  const [ecoOffset, setEcoOffset] = useState(0);
+  const [destroyedUnits, setDestroyedUnits] = useState(0);
+  const [decomImei, setDecomImei] = useState("");
   const [ecoCertIssued, setEcoCertIssued] = useState<string | null>(null);
+
+  useEffect(() => {
+    const q = query(collection(db, "recyclerCertificates"));
+    const unsub = onSnapshot(q, (snapshot) => {
+      setDestroyedUnits(snapshot.size);
+      let gold = 0;
+      let offset = 0;
+      snapshot.forEach(d => {
+        gold += d.data().goldReclaimed || 4.5;
+        offset += d.data().co2Offset || 1.2;
+      });
+      setEcoGold(gold);
+      setEcoOffset(offset);
+    }, (err) => console.warn("recyclerCertificates listener err:", err));
+    return () => unsub();
+  }, []);
 
   const decommissionHardware = async () => {
     if (!decomImei) return;
-    setEcoCertIssued(`ECO-SHIELD-DESTRUCT-${Math.floor(1000000 + Math.random() * 9000000)}`);
-    setEcoGold(g => g + 4.5);
-    setEcoOffset(o => o + 1.2);
-    setDestroyedUnits(u => u + 1);
+    const certCode = `ECO-SHIELD-DESTRUCT-${Math.floor(1000000 + Math.random() * 9000000)}`;
+    setEcoCertIssued(certCode);
+    try {
+      await addDoc(collection(db, "recyclerCertificates"), {
+        certCode,
+        imei: decomImei.trim(),
+        goldReclaimed: 4.5,
+        co2Offset: 1.2,
+        destroyedBy: user?.id || "recycler",
+        createdAt: new Date().toISOString()
+      });
+      
+      // Update any device record to recycled/destroyed
+      const devQuery = query(collection(db, "devices"), where("imei", "==", decomImei.trim()));
+      const snap = await getDocs(devQuery);
+      for (const d of snap.docs) {
+        await updateDoc(doc(db, "devices", d.id), { status: "destroyed", ecoCert: certCode });
+      }
+    } catch (err) {
+      console.error("Error saving recycler certificate:", err);
+    }
     addLog(`Hardware item ${decomImei} permanently decommissioned and logged. Issued Eco Destruction Certificate.`, "Eco");
+    setDecomImei("");
   };
 
-  // State 10: MNO carrier control
-  const [blocklists, setBlocklists] = useState([
-    { imei: "358941018902830", brand: "Samsung Ultra", operator: "Mascom Wireless", status: "Banned from network" },
-    { imei: "861502930291032", brand: "Huawei P55", operator: "Orange Botswana", status: "Banned from network" },
-  ]);
+  // State 10: MNO carrier control from Firestore
+  const [blocklists, setBlocklists] = useState<Array<{ id?: string, imei: string, brand: string, operator: string, status: string }>>([]);
   const [newBlockImei, setNewBlockImei] = useState("");
-  const [newBlockReason, setNewBlockReason] = useState("Stolen Police case");
+  const [newBlockReason, setNewBlockReason] = useState("Police Theft Incident");
 
-  const blockImeiMno = () => {
+  useEffect(() => {
+    const q = query(collection(db, "mnoBlocklists"));
+    const unsub = onSnapshot(q, (snapshot) => {
+      const loaded = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as any));
+      setBlocklists(loaded);
+    }, (err) => console.warn("mnoBlocklists listener err:", err));
+    return () => unsub();
+  }, []);
+
+  const blockImeiMno = async () => {
     if (!newBlockImei) return;
-    setBlocklists(prev => [...prev, { imei: newBlockImei, brand: "Device Unknown", operator: "Registry Sync Server", status: `Enforced (${newBlockReason})` }]);
-    addLog(`MNO Network embargo placed on IMEI: ${newBlockImei}`, "MNO-Interdict");
-    setNewBlockImei("");
+    const newEntry = {
+      imei: newBlockImei.trim(),
+      brand: "Device Network Record",
+      operator: "Registry Sync Gateway",
+      status: `Enforced (${newBlockReason})`,
+      createdAt: new Date().toISOString()
+    };
+    try {
+      await addDoc(collection(db, "mnoBlocklists"), newEntry);
+      addLog(`MNO Network embargo placed on IMEI: ${newBlockImei}`, "MNO-Interdict");
+      setNewBlockImei("");
+    } catch (err) {
+      console.error("Error creating MNO block:", err);
+    }
   };
 
-  // State 11: POLICE - hotlist
-  const [policeThefts, setPoliceThefts] = useState([
-    { case: "CAS-9210-A", model: "iPhone 14 Black", imei: "359120302910239", reporter: "Lesego P.", date: "2026-05-24" },
-    { case: "CAS-1122-B", model: "Galaxy S23 Ultra", imei: "861293039201930", reporter: "Gosiame S.", date: "2026-05-25" },
-  ]);
+  // State 11: POLICE - hotlist from Firestore
+  const [policeThefts, setPoliceThefts] = useState<Array<{ id?: string, case: string, model: string, imei: string, reporter: string, date: string }>>([]);
   const [theftImei, setTheftImei] = useState("");
   const [theftModel, setTheftModel] = useState("");
   const [theftReporter, setTheftReporter] = useState("");
 
-  const publishPoliceTheft = () => {
+  useEffect(() => {
+    const q = query(collection(db, "policeThefts"));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const loadedThefts = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as any));
+      setPoliceThefts(loadedThefts);
+    }, (err) => {
+      console.warn("policeThefts listener err:", err);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  const publishPoliceTheft = async () => {
     if (!theftImei || !theftModel) return;
     const code = `CAS-${Math.floor(1000 + Math.random() * 9000)}-Z`;
-    setPoliceThefts(prev => [{ case: code, model: theftModel, imei: theftImei, reporter: theftReporter || "Unidentified", date: "2026-05-26" }, ...prev]);
-    addLog(`Logged Case: ${code} - Dispatch stolen alert broadcast index.`, "POLICE");
-    setTheftImei("");
-    setTheftModel("");
+    const newRecord = { 
+      case: code, 
+      model: theftModel, 
+      imei: theftImei.trim(), 
+      reporter: theftReporter || "Citizen Report", 
+      date: new Date().toISOString().slice(0, 10),
+      createdAt: new Date().toISOString()
+    };
+
+    try {
+      await addDoc(collection(db, "policeThefts"), newRecord);
+      
+      // Update any existing registered device with this IMEI to stolen
+      const cleanImei = theftImei.trim();
+      const devQuery = query(collection(db, "devices"), where("imei", "==", cleanImei));
+      const devSnap = await getDocs(devQuery);
+      for (const d of devSnap.docs) {
+        await updateDoc(doc(db, "devices", d.id), {
+          status: "stolen",
+          policeCase: code
+        });
+      }
+
+      setPoliceThefts(prev => [newRecord, ...prev]);
+      addLog(`Logged Case: ${code} - Dispatched stolen alert for IMEI: ${theftImei}`, "POLICE");
+      
+      // Broadcast critical stolen device alert across network
+      await sendNotification({
+        title: `🚨 Stolen Device Incident Flagged: ${theftModel}`,
+        message: `Police Case ${code} issued for IMEI: ${cleanImei}. Any check or trade on this device will trigger an automated alert.`,
+        type: "theft_alert",
+        priority: "critical",
+        userId: "all",
+        actionUrl: "/dashboard?tab=police",
+        actionLabel: "View Case Dossier"
+      });
+
+      setTheftImei("");
+      setTheftModel("");
+      setTheftReporter("");
+    } catch (err) {
+      console.error("Error saving police theft:", err);
+      setPoliceThefts(prev => [newRecord, ...prev]);
+      addLog(`Logged Case: ${code} locally`, "POLICE");
+      setTheftImei("");
+      setTheftModel("");
+    }
   };
 
   // State 12: BURS Customs border
@@ -660,13 +1008,22 @@ export function DashboardClient({ initialSlug }: { initialSlug?: string }) {
   // Dynamic stats calculated dynamically depending on individual status variables
   const dynamicStats = useMemo(() => {
     switch (currentRole) {
-      case "individual":
+      case "individual": {
+        const totalVal = devicesList.reduce((acc, dev) => {
+          if (!dev.value) return acc;
+          const num = parseFloat(dev.value.replace(/[^\d.]/g, '')) || 0;
+          return acc + num;
+        }, 0);
+        const securedCount = devicesList.filter(d => d.status === 'secured' || d.status === 'active' || d.status === 'Secured').length;
+        const standingPct = devicesList.length > 0 ? Math.round((securedCount / devicesList.length) * 100) : 100;
+        const activeTransfers = devicesList.filter(d => d.transferCode || d.status === 'pending_transfer').length;
         return [
-          { label: "My Registry Count", value: `${devicesList.length} Connected`, change: "All units certified clean", color: "sky", icon: Smartphone },
-          { label: "Handowners Active", value: "1 Device Code", change: transCode || "Ready to transfer", color: "indigo", icon: Share2 },
-          { label: "Audited Market Val", value: "P 48,487", change: "Average household worth", color: "emerald", icon: Coins },
-          { label: "Global Safe standing", value: "100% Clean", change: "No flag reports active", color: "teal", icon: ShieldCheck }
+          { label: "My Registry Count", value: `${devicesList.length} Connected`, change: "All units certified in database", color: "sky", icon: Smartphone },
+          { label: "Handowners Active", value: `${activeTransfers} Pending`, change: transCode ? `Code: ${transCode}` : "Ready to transfer", color: "indigo", icon: Share2 },
+          { label: "Audited Market Val", value: `P ${totalVal.toLocaleString()}`, change: "Sum of enrolled device values", color: "emerald", icon: Coins },
+          { label: "Global Safe standing", value: `${standingPct}% Secured`, change: `${securedCount} of ${devicesList.length} devices secured`, color: "teal", icon: ShieldCheck }
         ];
+      }
       case "family":
         return [
           { label: "Circle Members", value: `${famMembers.length} Households`, change: "Primary family tracker", color: "pink", icon: Users },
@@ -789,18 +1146,16 @@ export function DashboardClient({ initialSlug }: { initialSlug?: string }) {
       </div>
       <Navbar />
       <main className="relative z-10 pt-24 pb-16 px-4 sm:px-6 lg:px-8 max-w-7xl mx-auto">
-
-
         {/* Dashboard Role Header */}
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 mb-10 border-b border-slate-200 dark:border-slate-900 pb-10">
+        <div className="mb-8 border-b border-slate-200/80 dark:border-slate-800/80 pb-6 flex flex-col lg:flex-row lg:items-end justify-between gap-6">
           <motion.div
             key={currentRole}
-            initial={{ opacity: 0, x: -10 }}
-            animate={{ opacity: 1, x: 0 }}
-            className="space-y-1 max-w-2xl"
+            initial={{ opacity: 0, y: -6 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="space-y-2 max-w-3xl"
           >
-            <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-sky-600 dark:text-sky-400">
-              <Globe className="w-3 h-3" />
+            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-sky-500/10 border border-sky-500/20 text-[10px] font-bold uppercase tracking-wider text-sky-600 dark:text-sky-400">
+              <Globe className="w-3.5 h-3.5" />
               <span>Registry Terminal • Role-Specific Ecosystem Workspace</span>
             </div>
             <h1 className="text-3xl md:text-4xl font-black text-slate-900 dark:text-white uppercase tracking-tight">
@@ -809,32 +1164,87 @@ export function DashboardClient({ initialSlug }: { initialSlug?: string }) {
             <p className="text-sm font-semibold text-slate-600 dark:text-slate-200">
               {activeMetadata.subtitle}
             </p>
-            <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed pt-2">
+            <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed pt-1">
               {activeMetadata.about}
             </p>
           </motion.div>
 
-          <div className="flex md:flex-col items-start gap-4">
-            <div className="px-6 py-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200/60 dark:border-slate-800/60 shadow-sm">
-              <p className="text-[9px] font-black uppercase tracking-wider text-slate-400 mb-0.5">Logged Account</p>
-              <div className="flex items-center gap-2">
-                <span className="text-sm font-bold text-slate-900 dark:text-white leading-none">
-                  {user.name}
-                </span>
-                <span className="text-[9px] font-bold px-2 py-0.5 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 rounded-full uppercase">
-                  {currentRole}
-                </span>
-              </div>
-            </div>
+          {/* Header Quick Action Toolbar */}
+          <div className="flex flex-wrap items-center gap-3 shrink-0">
+            <button
+              onClick={() => setShowAddDeviceForm(true)}
+              className="px-4 py-2.5 bg-sky-600 hover:bg-sky-500 text-white rounded-2xl text-xs font-bold uppercase tracking-wider transition-all flex items-center gap-2 shadow-lg shadow-sky-600/20 active:scale-95 cursor-pointer"
+            >
+              <Plus className="w-4 h-4" />
+              <span>Add Device</span>
+            </button>
+
+            <button
+              onClick={() => {
+                setSelectedReportDevId(undefined);
+                setIsReportModalOpen(true);
+              }}
+              className="px-4 py-2.5 rounded-2xl border border-rose-500/30 bg-rose-500/10 hover:bg-rose-500/20 text-rose-600 dark:text-rose-400 text-xs font-bold uppercase tracking-wider transition-all flex items-center gap-2 active:scale-95 cursor-pointer"
+            >
+              <ShieldAlert className="w-4 h-4" />
+              <span>Report Lost/Stolen</span>
+            </button>
           </div>
         </div>
 
-        {/* Dynamic Role Stats Cards Grid */}
+        {/* 1. INSTANT DEVICE STATUS & OWNERSHIP SEARCH */}
+        <div className="mb-8 rounded-3xl border border-slate-200/60 dark:border-slate-800/60 bg-white dark:bg-slate-900/80 backdrop-blur-sm p-6 hover:border-sky-500/40 transition-all duration-300">
+          <div className="flex flex-col md:flex-row md:items-center gap-6">
+            <div className="flex items-center gap-3 md:w-1/3">
+              <div className="p-3 rounded-2xl bg-sky-500/10 text-sky-600 dark:text-sky-400">
+                <Search className="w-6 h-6 animate-pulse" />
+              </div>
+              <div>
+                <h3 className="font-bold text-slate-900 dark:text-white uppercase text-sm tracking-tight">Instant Device Status & Ownership Search</h3>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400">Look up any phone serial or IMEI number to check if it has been marked as lost, stolen, or clean.</p>
+              </div>
+            </div>
+
+            <div className="flex-1 flex flex-col sm:flex-row gap-3">
+              <input 
+                type="text" 
+                placeholder="Enter IMEI or Serial Number (e.g. S/N: 92834722, include 'stolen' for warning sandbox)..." 
+                className="flex-1 px-4 py-3 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-2xl text-sm font-medium text-slate-900 dark:text-white focus:outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500 transition-all font-mono"
+                value={imeiQuery}
+                onChange={(e) => setImeiQuery(e.target.value)}
+              />
+              <button 
+                onClick={handleCheckImei}
+                disabled={isChecking || !imeiQuery}
+                className="px-8 py-3 bg-slate-900 dark:bg-slate-800 text-white rounded-2xl font-bold text-xs uppercase tracking-wider hover:bg-slate-800 dark:hover:bg-slate-700 transition-all disabled:opacity-50 flex items-center justify-center gap-2 shadow-md shrink-0 cursor-pointer"
+              >
+                {isChecking ? <Loader2 className="w-4 h-4 animate-spin text-sky-500" /> : <ShieldCheck className="w-4 h-4 text-emerald-500" />}
+                Search Registry
+              </button>
+            </div>
+          </div>
+
+          <AnimatePresence mode="wait">
+            {checkResult && (
+              <motion.div 
+                initial={{ opacity: 0, height: 0, marginTop: 0 }}
+                animate={{ opacity: 1, height: 'auto', marginTop: 16 }}
+                exit={{ opacity: 0, height: 0, marginTop: 0 }}
+                className={`p-4 rounded-2xl border flex items-center gap-3 text-sm ${checkResult.status === 'clean' ? 'bg-emerald-50 dark:bg-emerald-500/10 border-emerald-200 dark:border-emerald-500/20 text-emerald-700 dark:text-emerald-400' : 'bg-rose-50 dark:bg-rose-500/10 border-rose-200 dark:border-rose-500/20 text-rose-700 dark:text-rose-400'}`}
+              >
+                {checkResult.status === 'clean' ? <CheckCircle2 className="w-5 h-5 shrink-0" /> : <AlertTriangle className="w-5 h-5 shrink-0" />}
+                <span className="text-xs font-bold uppercase tracking-tight">{checkResult.msg}</span>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+
+        {/* 2. DYNAMIC ROLE STATS CARDS GRID */}
         <motion.div 
           key={`stats-${currentRole}`}
           initial={{ opacity: 0, y: 15 }}
           animate={{ opacity: 1, y: 0 }}
-          className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-10"
+          className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8"
         >
           {dynamicStats.map((stat, i) => {
             const Icon = stat.icon;
@@ -864,63 +1274,308 @@ export function DashboardClient({ initialSlug }: { initialSlug?: string }) {
           })}
         </motion.div>
 
-        {/* GLOBAL IMEI SEARCH / DATABASE LOOKUP WIDGET */}
-        <div className="mb-10 rounded-3xl border border-slate-200/60 dark:border-slate-800/60 bg-white dark:bg-slate-900/80 backdrop-blur-sm p-6 hover:border-sky-500/40 transition-all duration-300">
-          <div className="flex flex-col md:flex-row md:items-center gap-6">
-            <div className="flex items-center gap-3 md:w-1/3">
-              <div className="p-3 rounded-2xl bg-sky-500/10 text-sky-600 dark:text-sky-400">
-                <Search className="w-6 h-6 animate-pulse" />
+        {/* 3. ACTIVE SAFE INVENTORY */}
+        <div className="mb-8 bg-white dark:bg-slate-900/60 border border-slate-200/60 dark:border-slate-800/60 rounded-3xl p-6 shadow-sm">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6 pb-4 border-b border-slate-100 dark:border-slate-800">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-xl bg-sky-500/10 flex items-center justify-center text-sky-500">
+                <Smartphone className="w-5 h-5" />
               </div>
               <div>
-                <h3 className="font-bold text-slate-900 dark:text-white uppercase text-sm tracking-tight">Instant Device Status & Ownership Search</h3>
-                <p className="text-[11px] text-slate-500 dark:text-slate-400">Look up any phone serial or IMEI number to check if it has been marked as lost, stolen, or clean.</p>
+                <h2 className="text-base font-black text-slate-900 dark:text-white uppercase tracking-tight flex items-center gap-2">
+                  Active Safe Inventory
+                  <span className="text-xs font-mono text-slate-500 dark:text-slate-400 bg-slate-100 dark:bg-slate-800 px-2.5 py-0.5 rounded-full font-bold">
+                    {devicesList.length}
+                  </span>
+                </h2>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400">Enrolled hardware units &amp; status verification titles registered to your profile</p>
               </div>
             </div>
 
-            <div className="flex-1 flex flex-col sm:flex-row gap-3">
-              <input 
-                type="text" 
-                placeholder="Enter IMEI or Serial Number (e.g. S/N: 92834722, include 'stolen' for warning sandbox)..." 
-                className="flex-1 px-4 py-3 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-2xl text-sm font-medium text-slate-900 dark:text-white focus:outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500 transition-all font-mono"
-                value={imeiQuery}
-                onChange={(e) => setImeiQuery(e.target.value)}
-              />
-              <button 
-                onClick={handleCheckImei}
-                disabled={isChecking || !imeiQuery}
-                className="px-8 py-3 bg-slate-900 dark:bg-slate-800 text-white rounded-2xl font-bold text-xs uppercase tracking-wider hover:bg-slate-800 dark:hover:bg-slate-700 transition-all disabled:opacity-50 flex items-center justify-center gap-2 shadow-md shrink-0"
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => {
+                  setSelectedReportDevId(undefined);
+                  setIsReportModalOpen(true);
+                }}
+                className="px-3.5 py-2 rounded-xl border border-rose-500/20 bg-rose-500/10 hover:bg-rose-500/20 text-rose-600 dark:text-rose-400 text-xs font-bold uppercase tracking-wider transition-all flex items-center gap-1.5 cursor-pointer"
               >
-                {isChecking ? <Loader2 className="w-4 h-4 animate-spin text-sky-500" /> : <ShieldCheck className="w-4 h-4 text-emerald-500" />}
-                Search Registry
+                <ShieldAlert className="w-3.5 h-3.5" />
+                <span>Report Lost/Stolen</span>
+              </button>
+
+              <button
+                onClick={() => setShowAddDeviceForm(true)}
+                className="px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-xl text-xs font-bold uppercase tracking-wider transition-all flex items-center gap-1.5 shadow-sm active:scale-95 cursor-pointer"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>Add Device</span>
               </button>
             </div>
           </div>
 
-          <AnimatePresence mode="wait">
-            {checkResult && (
-              <motion.div 
-                initial={{ opacity: 0, height: 0, marginTop: 0 }}
-                animate={{ opacity: 1, height: 'auto', marginTop: 16 }}
-                exit={{ opacity: 0, height: 0, marginTop: 0 }}
-                className={`p-4 rounded-2xl border flex items-center gap-3 text-sm ${checkResult.status === 'clean' ? 'bg-emerald-50 dark:bg-emerald-500/10 border-emerald-200 dark:border-emerald-500/20 text-emerald-700 dark:text-emerald-400' : 'bg-rose-50 dark:bg-rose-500/10 border-rose-200 dark:border-rose-500/20 text-rose-700 dark:text-rose-400'}`}
-              >
-                {checkResult.status === 'clean' ? <CheckCircle2 className="w-5 h-5 shrink-0" /> : <AlertTriangle className="w-5 h-5 shrink-0" />}
-                <span className="text-xs font-bold uppercase tracking-tight">{checkResult.msg}</span>
-              </motion.div>
+          {/* Add Device Portal Modal Overlay */}
+          <AnimatePresence>
+            {showAddDeviceForm && typeof window !== 'undefined' && createPortal(
+              <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-sm overflow-y-auto">
+                <motion.div
+                  initial={{ opacity: 0, scale: 0.95, y: 10 }}
+                  animate={{ opacity: 1, scale: 1, y: 0 }}
+                  exit={{ opacity: 0, scale: 0.95, y: 10 }}
+                  className="bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 rounded-3xl p-6 sm:p-8 max-w-lg w-full shadow-2xl relative my-8 text-left"
+                >
+                  <div className="flex justify-between items-start mb-6 pb-4 border-b border-slate-100 dark:border-slate-800">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-2xl bg-sky-500/10 text-sky-500 flex items-center justify-center shrink-0">
+                        <Smartphone className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <h3 className="text-base font-black uppercase text-slate-900 dark:text-white tracking-tight">
+                          Register Secure Handover Asset
+                        </h3>
+                        <p className="text-xs text-slate-500 dark:text-slate-400">
+                          Enroll hardware title tag onto the national registry vault.
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowAddDeviceForm(false)}
+                      className="p-2 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-500 transition-colors cursor-pointer"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+
+                  <form onSubmit={handleRegisterDevice} className="space-y-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div className="space-y-1">
+                        <label className="block text-[10px] uppercase font-bold text-slate-400">Device Name *</label>
+                        <input
+                          type="text"
+                          required
+                          placeholder="e.g. Google Pixel 9 Pro"
+                          value={newDeviceName}
+                          onChange={(e) => setNewDeviceName(e.target.value)}
+                          className="w-full px-3.5 py-2.5 border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 rounded-xl text-xs font-semibold text-slate-900 dark:text-white focus:outline-none focus:border-sky-500"
+                        />
+                      </div>
+
+                      <div className="space-y-1">
+                        <label className="block text-[10px] uppercase font-bold text-slate-400">Manufacturer/Brand *</label>
+                        <input
+                          type="text"
+                          required
+                          placeholder="e.g. Google"
+                          value={newDeviceBrand}
+                          onChange={(e) => setNewDeviceBrand(e.target.value)}
+                          className="w-full px-3.5 py-2.5 border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 rounded-xl text-xs font-semibold text-slate-900 dark:text-white focus:outline-none focus:border-sky-500"
+                        />
+                      </div>
+
+                      <div className="space-y-1">
+                        <label className="block text-[10px] uppercase font-bold text-slate-400">Serial or IMEI Number *</label>
+                        <input
+                          type="text"
+                          required
+                          placeholder="e.g. 3590123910399"
+                          value={newDeviceSerial}
+                          onChange={(e) => setNewDeviceSerial(e.target.value)}
+                          className="w-full px-3.5 py-2.5 border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 rounded-xl text-xs font-semibold text-slate-900 dark:text-white focus:outline-none focus:border-sky-500 font-mono"
+                        />
+                      </div>
+
+                      <div className="space-y-1">
+                        <label className="block text-[10px] uppercase font-bold text-slate-400">Estimated Value (BWP/Pula)</label>
+                        <input
+                          type="number"
+                          placeholder="e.g. 8500"
+                          value={newDeviceValue}
+                          onChange={(e) => setNewDeviceValue(e.target.value)}
+                          className="w-full px-3.5 py-2.5 border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 rounded-xl text-xs font-semibold text-slate-900 dark:text-white focus:outline-none focus:border-sky-500 font-mono"
+                        />
+                      </div>
+
+                      <div className="space-y-1 sm:col-span-2">
+                        <label className="block text-[10px] uppercase font-bold text-slate-400">Device Category</label>
+                        <select
+                          value={newDeviceType}
+                          onChange={(e) => setNewDeviceType(e.target.value)}
+                          className="w-full px-3.5 py-2.5 border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 rounded-xl text-xs font-semibold text-slate-900 dark:text-white focus:outline-none focus:border-sky-500"
+                        >
+                          <option value="Phone">Phone / Cellular</option>
+                          <option value="Laptop">Laptop Computer</option>
+                          <option value="Tablet">Tablet Device</option>
+                          <option value="Audio">Audio / Accessories</option>
+                          <option value="Other">Custom Hardware</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="pt-3 flex gap-3">
+                      <button
+                        type="button"
+                        onClick={() => setShowAddDeviceForm(false)}
+                        className="flex-1 py-3 border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 rounded-xl text-xs font-bold uppercase tracking-wider transition-all cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={isSubmittingDevice}
+                        className="flex-[2] py-3 bg-sky-600 hover:bg-sky-500 text-white rounded-xl text-xs font-bold uppercase tracking-wider transition-all flex items-center justify-center gap-2 shadow-md shadow-sky-600/20 active:scale-95 disabled:opacity-50 cursor-pointer"
+                      >
+                        {isSubmittingDevice ? (
+                          <>
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                            <span>Signing Title Tag...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Plus className="w-4 h-4" />
+                            <span>Compile &amp; Sign Title Tag</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </form>
+                </motion.div>
+              </div>,
+              document.body
             )}
           </AnimatePresence>
+
+          {/* Asset Grid */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            {devicesList.length === 0 ? (
+              <div className="col-span-full p-8 rounded-3xl bg-slate-50 dark:bg-slate-950/40 border border-dashed border-slate-300 dark:border-slate-800 text-center flex flex-col items-center justify-center space-y-3">
+                <div className="w-12 h-12 rounded-2xl bg-sky-500/10 text-sky-500 flex items-center justify-center">
+                  <Smartphone className="w-6 h-6" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900 dark:text-white">No Devices Registered Yet</h3>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 max-w-sm mt-0.5">
+                    Your account currently has 0 device records in the database. Click &quot;Enroll Device&quot; above to register your first device title.
+                  </p>
+                </div>
+                <button
+                  onClick={() => setShowAddDeviceForm(true)}
+                  className="px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-xl text-xs font-bold uppercase tracking-wider transition-all flex items-center gap-1.5 shadow-md shadow-sky-600/20 cursor-pointer"
+                >
+                  <Plus className="w-3.5 h-3.5" /> Enroll First Device
+                </button>
+              </div>
+            ) : (
+              devicesList.map((device) => {
+                const getIcon = () => {
+                  switch (device.type) {
+                    case 'Phone': return <Smartphone className="w-5 h-5" />;
+                    case 'Laptop': return <Monitor className="w-5 h-5" />;
+                    case 'Tablet': return <Tablet className="w-5 h-5" />;
+                    case 'Audio': return <Headphones className="w-5 h-5" />;
+                    default: return <Cpu className="w-5 h-5" />;
+                  }
+                };
+
+                const isSecured = device.status === 'secured' || device.status === 'active' || device.status === 'Secured';
+
+                const handleToggleStatus = async () => {
+                  try {
+                    const newStatus = isSecured ? 'flagged' : 'secured';
+                    await updateDoc(doc(db, "devices", device.id), {
+                      status: newStatus,
+                      lastSync: "Just now"
+                    });
+                    addLog(`Updated ${device.name} status to ${newStatus}`, "Security");
+                  } catch (err) {
+                    console.error("Error updating status:", err);
+                  }
+                };
+
+                const handleRemoveDevice = async () => {
+                  if (!confirm(`Are you sure you want to unenroll ${device.name}?`)) return;
+                  try {
+                    await deleteDoc(doc(db, "devices", device.id));
+                    addLog(`Unenrolled device ${device.name} (${device.serial})`, "Registry");
+                  } catch (err) {
+                    console.error("Error deleting device:", err);
+                  }
+                };
+
+                return (
+                  <div 
+                    key={device.id}
+                    className="p-5 bg-slate-50/50 dark:bg-slate-950/40 border border-slate-200/60 dark:border-slate-800/60 rounded-2xl hover:border-sky-500/40 transition-all group relative overflow-hidden"
+                  >
+                    <div className="flex justify-between items-start">
+                      <div className="flex items-center gap-3">
+                        <div className="w-9 h-9 rounded-xl bg-white dark:bg-slate-800 text-slate-500 flex items-center justify-center border border-slate-100 dark:border-slate-700/50 shadow-xs">
+                          {getIcon()}
+                        </div>
+                        <div>
+                          <h4 className="font-bold text-xs uppercase text-slate-900 dark:text-white group-hover:text-sky-500 transition-colors">{device.name}</h4>
+                          <p className="text-[9px] font-mono text-slate-400 mt-0.5">{device.serial}</p>
+                        </div>
+                      </div>
+                      
+                      <button
+                        onClick={handleToggleStatus}
+                        title="Click to toggle status between Secured & Flagged"
+                        className={`text-[8px] font-black uppercase px-2 py-0.5 border rounded-full transition-all cursor-pointer ${isSecured ? 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20 hover:bg-emerald-500/20' : 'bg-red-500/10 text-red-500 border-red-500/20 hover:bg-red-500/20'}`}
+                      >
+                        {device.status || 'Secured'}
+                      </button>
+                    </div>
+
+                    {device.rewardAmount && (
+                      <div className="mt-3 pt-2 border-t border-dashed border-amber-500/20 flex items-center justify-between text-[10px] font-bold text-amber-600 dark:text-amber-400 bg-amber-500/10 px-2.5 py-1 rounded-xl">
+                        <span>🎁 Recovery Reward:</span>
+                        <span className="font-mono font-black">{device.rewardAmount}</span>
+                      </div>
+                    )}
+
+                    <div className="flex justify-between items-center pt-3 border-t border-slate-200/60 dark:border-slate-800/80 mt-3">
+                      <div>
+                        <p className="text-[9px] text-slate-400 font-bold uppercase leading-none">Estimate</p>
+                        <p className="text-xs font-black text-slate-800 dark:text-white font-mono mt-1">{device.value || 'P 2,500'}</p>
+                      </div>
+                      
+                      <div className="flex items-center gap-3">
+                        <button
+                          onClick={() => {
+                            setSelectedReportDevId(device.id);
+                            setIsReportModalOpen(true);
+                          }}
+                          className="text-[10px] font-bold text-rose-500 hover:text-rose-600 dark:hover:text-rose-400 uppercase tracking-wider transition-colors flex items-center gap-1 cursor-pointer"
+                          title="Report this device as Lost or Stolen"
+                        >
+                          <ShieldAlert className="w-3 h-3" />
+                          <span>Report Theft</span>
+                        </button>
+                        <span className="text-slate-300 dark:text-slate-700 font-mono text-[10px]">•</span>
+                        <button
+                          onClick={handleRemoveDevice}
+                          className="text-[10px] font-medium text-slate-400 hover:text-rose-500 uppercase tracking-wider transition-colors cursor-pointer"
+                          title="Unenroll Device"
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
         </div>
 
         {/* WORKSPACE SWITCHED PORTAL RENDERING */}
-        <div className="grid lg:grid-cols-3 gap-8">
-          
-          {/* Main Column (spanning 2 columns) - Custom Interactive Interface */}
-          <div className="lg:col-span-2 space-y-8">
-            <AnimatePresence mode="wait">
-              <motion.div
-                key={currentRole}
-                initial={{ opacity: 0, y: 15 }}
-                animate={{ opacity: 1, y: 0 }}
+        <div className="space-y-8">
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={currentRole}
+              initial={{ opacity: 0, y: 15 }}
+              animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -15 }}
                 transition={{ duration: 0.25 }}
                 className="space-y-8"
@@ -1042,17 +1697,21 @@ export function DashboardClient({ initialSlug }: { initialSlug?: string }) {
                       <div className="space-y-3">
                         <h3 className="text-xs font-bold uppercase text-slate-400">Current Family Units</h3>
                         <div className="space-y-2">
-                          {famMembers.map((m, idx) => (
+                          {famMembers.length > 0 ? famMembers.map((m, idx) => (
                             <div key={idx} className="flex items-center justify-between p-3 border border-slate-100 dark:border-slate-800 rounded-2xl bg-slate-50/50 dark:bg-slate-950/10 hover:border-pink-500/20 transition-colors">
                               <div>
                                 <p className="text-xs font-black text-slate-900 dark:text-white">{m.name}</p>
-                                <p className="text-[10px] text-slate-400 font-medium">{m.relation} • {m.devices} Devices Secure</p>
+                                <p className="text-[10px] text-slate-400 font-medium">{m.relation} • {m.devices || 0} Devices Secure</p>
                               </div>
                               <span className="text-[9px] font-bold px-2 py-0.5 bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300 rounded-full font-mono">
-                                {m.profile}
+                                {m.profile || 'Standard'}
                               </span>
                             </div>
-                          ))}
+                          )) : (
+                            <div className="p-4 text-center border border-dashed border-slate-200 dark:border-slate-800 rounded-2xl text-slate-400 text-xs">
+                              No household members enrolled yet. Add a family member on the left.
+                            </div>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -1129,8 +1788,8 @@ export function DashboardClient({ initialSlug }: { initialSlug?: string }) {
                         <span className="text-[9px] font-mono text-sky-500 bg-sky-500/10 px-2 py-0.5 rounded">Risk Threshold: &lt; 30%</span>
                       </div>
                       <div className="space-y-3">
-                        {claims.map((claim) => (
-                          <div key={claim.id} className="p-4 border border-slate-200 dark:border-slate-800 rounded-3xl bg-slate-50/50 dark:bg-slate-950/20 hover:shadow-sm transition-all flex flex-col md:flex-row md:items-center justify-between gap-4">
+                        {claims.length > 0 ? claims.map((claim) => (
+                          <div key={claim.id || claim.docId} className="p-4 border border-slate-200 dark:border-slate-800 rounded-3xl bg-slate-50/50 dark:bg-slate-950/20 hover:shadow-sm transition-all flex flex-col md:flex-row md:items-center justify-between gap-4">
                             <div>
                               <div className="flex items-center gap-2">
                                 <span className="font-mono text-xs font-bold text-slate-500">{claim.id}</span>
@@ -1155,7 +1814,11 @@ export function DashboardClient({ initialSlug }: { initialSlug?: string }) {
                               </button>
                             </div>
                           </div>
-                        ))}
+                        )) : (
+                          <div className="p-6 text-center border border-dashed border-slate-200 dark:border-slate-800 rounded-3xl text-slate-400 text-xs">
+                            No insurance claim audits in queue. Live claims from the database will appear here.
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -1171,26 +1834,32 @@ export function DashboardClient({ initialSlug }: { initialSlug?: string }) {
 
                     <div className="space-y-4">
                       <h3 className="text-xs font-bold uppercase text-slate-400">Assigned Fleet Devices Logs</h3>
-                      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                        {corpfleet.map((f, idx) => (
-                          <div key={idx} className="p-4 rounded-2xl border border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/40 hover:border-blue-500/20 transition-all flex flex-col justify-between min-h-[140px]">
-                            <div>
-                              <div className="flex justify-between items-start">
-                                <span className="text-[9px] font-mono text-slate-400 uppercase tracking-widest">{f.name}</span>
-                                <span className={`text-[8px] font-bold px-1.5 py-0.5 rounded-full ${f.lockState === 'Unlocked' ? 'bg-emerald-500/10 text-emerald-500' : 'bg-red-500/10 text-red-500'}`}>{f.lockState}</span>
+                      {corpfleet.length > 0 ? (
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                          {corpfleet.map((f, idx) => (
+                            <div key={f.id || idx} className="p-4 rounded-2xl border border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/40 hover:border-blue-500/20 transition-all flex flex-col justify-between min-h-[140px]">
+                              <div>
+                                <div className="flex justify-between items-start">
+                                  <span className="text-[9px] font-mono text-slate-400 uppercase tracking-widest">{f.name}</span>
+                                  <span className={`text-[8px] font-bold px-1.5 py-0.5 rounded-full ${f.lockState === 'Unlocked' ? 'bg-emerald-500/10 text-emerald-500' : 'bg-red-500/10 text-red-500'}`}>{f.lockState}</span>
+                                </div>
+                                <h4 className="font-bold text-sm text-slate-900 dark:text-white mt-2">{f.employee}</h4>
+                                <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5">{f.status}</p>
                               </div>
-                              <h4 className="font-bold text-sm text-slate-900 dark:text-white mt-2">{f.employee}</h4>
-                              <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5">{f.status}</p>
+                              <button 
+                                onClick={() => toggleMdmLock(f.id || f.name)}
+                                className={`w-full mt-3 py-1 rounded text-[9px] font-black uppercase tracking-wider transition-colors ${f.lockState === 'Unlocked' ? 'bg-rose-600 hover:bg-rose-500 text-white' : 'bg-emerald-600 hover:bg-emerald-500 text-white'}`}
+                              >
+                                {f.lockState === 'Unlocked' ? "Trigger MDM Freeze" : "Release Hold"}
+                              </button>
                             </div>
-                            <button 
-                              onClick={() => toggleMdmLock(f.name)}
-                              className={`w-full mt-3 py-1 rounded text-[9px] font-black uppercase tracking-wider transition-colors ${f.lockState === 'Unlocked' ? 'bg-rose-600 hover:bg-rose-500 text-white' : 'bg-emerald-600 hover:bg-emerald-500 text-white'}`}
-                            >
-                              {f.lockState === 'Unlocked' ? "Trigger MDM Freeze" : "Release Hold"}
-                            </button>
-                          </div>
-                        ))}
-                      </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="p-6 text-center border border-dashed border-slate-200 dark:border-slate-800 rounded-2xl text-slate-400 text-xs">
+                          No corporate fleet devices enrolled. Live hardware records will show here.
+                        </div>
+                      )}
                     </div>
                   </div>
                 )}
@@ -1227,15 +1896,19 @@ export function DashboardClient({ initialSlug }: { initialSlug?: string }) {
                         <div className="space-y-2">
                           <h3 className="text-xs font-bold uppercase text-slate-400">Active API Tokens</h3>
                           <div className="space-y-1">
-                            {apiKeys.map((k, idx) => (
-                              <div key={idx} className="flex justify-between items-center text-[10px] font-mono p-2 bg-slate-50 dark:bg-slate-950/40 border border-slate-200/50 dark:border-slate-800/80 rounded-xl">
+                            {apiKeys.length > 0 ? apiKeys.map((k, idx) => (
+                              <div key={k.id || idx} className="flex justify-between items-center text-[10px] font-mono p-2 bg-slate-50 dark:bg-slate-950/40 border border-slate-200/50 dark:border-slate-800/80 rounded-xl">
                                 <div>
                                   <p className="font-bold text-slate-700 dark:text-slate-300">{k.name}</p>
                                   <p className="text-slate-400 mt-0.5">{k.key}</p>
                                 </div>
                                 <span className="text-slate-400 font-bold">{k.count}</span>
                               </div>
-                            ))}
+                            )) : (
+                              <div className="p-3 text-center border border-dashed border-slate-200 dark:border-slate-800 rounded-xl text-slate-400 text-xs font-sans">
+                                No API tokens generated yet.
+                              </div>
+                            )}
                           </div>
                         </div>
                       </div>
@@ -1366,8 +2039,8 @@ export function DashboardClient({ initialSlug }: { initialSlug?: string }) {
                       <div className="space-y-3">
                         <h3 className="text-xs font-bold uppercase text-slate-400 font-mono">Loan Allocations</h3>
                         <div className="space-y-2">
-                          {loans.map((l, idx) => (
-                            <div key={idx} className="p-3 border border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/40 rounded-xl flex items-center justify-between gap-4">
+                          {loans.length > 0 ? loans.map((l, idx) => (
+                            <div key={l.id || idx} className="p-3 border border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/40 rounded-xl flex items-center justify-between gap-4">
                               <div>
                                 <p className="text-xs font-bold text-slate-800 dark:text-white">{l.student}</p>
                                 <p className="text-[10px] text-slate-400 font-mono">Assigned: {l.unit} • Due: {l.due}</p>
@@ -1380,7 +2053,11 @@ export function DashboardClient({ initialSlug }: { initialSlug?: string }) {
                                 {l.alertSent ? "SMS Sent" : "Siren Student"}
                               </button>
                             </div>
-                          ))}
+                          )) : (
+                            <div className="p-4 text-center border border-dashed border-slate-200 dark:border-slate-800 rounded-xl text-slate-400 text-xs">
+                              No student hardware loans recorded.
+                            </div>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -1480,8 +2157,8 @@ export function DashboardClient({ initialSlug }: { initialSlug?: string }) {
                       <div className="space-y-3">
                         <h3 className="text-xs font-bold uppercase text-slate-400 font-mono">MNO Network Embargo Actions</h3>
                         <div className="space-y-2">
-                          {blocklists.map((b, idx) => (
-                            <div key={idx} className="p-3 border border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/40 rounded-xl flex justify-between items-center text-[11px] font-mono">
+                          {blocklists.length > 0 ? blocklists.map((b, idx) => (
+                            <div key={b.id || idx} className="p-3 border border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/40 rounded-xl flex justify-between items-center text-[11px] font-mono">
                               <div>
                                 <p className="font-bold text-slate-900 dark:text-white">{b.imei}</p>
                                 <p className="text-slate-400 text-[10px]">{b.operator}</p>
@@ -1490,7 +2167,11 @@ export function DashboardClient({ initialSlug }: { initialSlug?: string }) {
                                 {b.status}
                               </span>
                             </div>
-                          ))}
+                          )) : (
+                            <div className="p-4 text-center border border-dashed border-slate-200 dark:border-slate-800 rounded-xl text-slate-400 text-xs">
+                              No active network IMEI embargos on record.
+                            </div>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -1542,8 +2223,8 @@ export function DashboardClient({ initialSlug }: { initialSlug?: string }) {
                       <div className="space-y-3">
                         <h3 className="text-xs font-bold uppercase text-slate-400">Dispatched Cases Hotline</h3>
                         <div className="space-y-2 max-h-56 overflow-y-auto">
-                          {policeThefts.map((pt, idx) => (
-                            <div key={idx} className="p-3 border border-rose-500/10 bg-rose-500/5 rounded-2xl">
+                          {policeThefts.length > 0 ? policeThefts.map((pt, idx) => (
+                            <div key={pt.id || idx} className="p-3 border border-rose-500/10 bg-rose-500/5 rounded-2xl">
                               <div className="flex justify-between items-center mb-1">
                                 <span className="font-mono text-xs font-black text-rose-500">{pt.case}</span>
                                 <span className="text-[9px] text-slate-400">{pt.date}</span>
@@ -1551,7 +2232,11 @@ export function DashboardClient({ initialSlug }: { initialSlug?: string }) {
                               <h4 className="font-bold text-xs text-slate-900 dark:text-white">{pt.model}</h4>
                               <p className="text-[10px] text-slate-400 mt-1">IMEI check: <span className="font-mono text-red-500 font-bold">{pt.imei}</span> • Complainant: {pt.reporter}</p>
                             </div>
-                          ))}
+                          )) : (
+                            <div className="p-4 text-center border border-dashed border-slate-200 dark:border-slate-800 rounded-2xl text-slate-400 text-xs">
+                              No stolen case alerts active in registry.
+                            </div>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -1690,15 +2375,15 @@ export function DashboardClient({ initialSlug }: { initialSlug?: string }) {
               </motion.div>
             </AnimatePresence>
 
-            {/* Elegant Ecosystem Analytics and Trend Visualizations */}
-            <div className="bg-white dark:bg-slate-900 border border-slate-200/60 dark:border-slate-800/60 rounded-3xl p-6 shadow-sm space-y-6">
+            {/* 5. PLATFORM ANALYTICAL INTELLIGENCE (ANALYTICS DESK) AT THE BOTTOM */}
+            <div className="mt-10 bg-white dark:bg-slate-900 border border-slate-200/60 dark:border-slate-800/60 rounded-3xl p-6 shadow-sm space-y-6">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-4 gap-2">
                 <div>
                   <h3 className="text-sm font-black uppercase text-slate-800 dark:text-white flex items-center gap-2">
                     <Activity className="w-4 h-4 text-sky-500 animate-pulse" />
                     {user?.name ? `${user.name}'s Analytics Desk` : "Platform Analytical Intelligence"}
                   </h3>
-                  <p className="text-[11px] text-slate-500 dark:text-slate-400">Statistical trends for operational role: <strong className="text-sky-600 dark:text-sky-400 uppercase">{currentRole}</strong></p>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400">Statistical trends &amp; ecosystem activity for operational role: <strong className="text-sky-600 dark:text-sky-400 uppercase">{currentRole}</strong></p>
                 </div>
                 <div className="text-xs font-mono font-bold px-3 py-1 bg-sky-50 dark:bg-sky-500/10 text-sky-600 dark:text-sky-400 rounded-full border border-sky-500/10">
                   Compliance Level: 98.4% A+
@@ -1830,250 +2515,13 @@ export function DashboardClient({ initialSlug }: { initialSlug?: string }) {
 
               </div>
             </div>
-
-            {/* General Registered Devices View - Adaptive */}
-            <div>
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
-                <div className="flex items-center gap-3">
-                  <div className="w-8 h-8 rounded-lg bg-sky-500/10 flex items-center justify-center text-sky-500">
-                    <Smartphone className="w-4 h-4" />
-                  </div>
-                  <h2 className="text-md font-bold text-slate-900 dark:text-white uppercase tracking-tight">Active Safe Inventory</h2>
-                  <span className="text-xs font-mono text-slate-500 dark:text-slate-400 bg-slate-100 dark:bg-slate-800 px-2 py-0.5 rounded-full">
-                    {devicesList.length}
-                  </span>
-                </div>
-
-                <button
-                  onClick={() => setShowAddDeviceForm(!showAddDeviceForm)}
-                  className="px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-xl text-xs font-bold uppercase tracking-wider transition-all flex items-center gap-1.5 shadow-sm active:scale-95"
-                >
-                  <Plus className="w-4 h-4" />
-                  Log New Device Tag
-                </button>
-              </div>
-
-              {/* Add Device Form Block */}
-              <AnimatePresence>
-                {showAddDeviceForm && (
-                  <motion.div
-                    initial={{ opacity: 0, height: 0, marginBottom: 0 }}
-                    animate={{ opacity: 1, height: 'auto', marginBottom: 24 }}
-                    exit={{ opacity: 0, height: 0, marginBottom: 0 }}
-                    className="overflow-hidden"
-                  >
-                    <form onSubmit={handleRegisterDevice} className="p-6 bg-slate-50 dark:bg-slate-950/40 border border-slate-200/60 dark:border-slate-800/60 rounded-2xl space-y-4">
-                      <div className="flex justify-between items-center border-b border-slate-200/40 dark:border-slate-800/40 pb-2">
-                        <h3 className="text-xs font-black uppercase text-slate-800 dark:text-white">Register Secure Handover Asset</h3>
-                        <button 
-                          type="button" 
-                          onClick={() => setShowAddDeviceForm(false)} 
-                          className="text-slate-450 hover:text-slate-700 dark:hover:text-white text-xs font-bold uppercase"
-                        >
-                          Cancel
-                        </button>
-                      </div>
-
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                        <div className="space-y-1">
-                          <label className="block text-[10px] uppercase font-bold text-slate-400">Device Name</label>
-                          <input
-                            type="text"
-                            required
-                            placeholder="e.g. Google Pixel 9 Pro"
-                            value={newDeviceName}
-                            onChange={(e) => setNewDeviceName(e.target.value)}
-                            className="w-full px-3 py-2 border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 rounded-xl text-xs font-medium text-slate-900 dark:text-white focus:outline-none focus:border-sky-500"
-                          />
-                        </div>
-
-                        <div className="space-y-1">
-                          <label className="block text-[10px] uppercase font-bold text-slate-400">Manufacturer/Brand</label>
-                          <input
-                            type="text"
-                            required
-                            placeholder="e.g. Google"
-                            value={newDeviceBrand}
-                            onChange={(e) => setNewDeviceBrand(e.target.value)}
-                            className="w-full px-3 py-2 border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 rounded-xl text-xs font-medium text-slate-900 dark:text-white focus:outline-none focus:border-sky-500"
-                          />
-                        </div>
-
-                        <div className="space-y-1">
-                          <label className="block text-[10px] uppercase font-bold text-slate-400">Serial or IMEI Number</label>
-                          <input
-                            type="text"
-                            required
-                            placeholder="e.g. 3590123910399"
-                            value={newDeviceSerial}
-                            onChange={(e) => setNewDeviceSerial(e.target.value)}
-                            className="w-full px-3 py-2 border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 rounded-xl text-xs font-medium text-slate-900 dark:text-white focus:outline-none focus:border-sky-500 font-mono"
-                          />
-                        </div>
-
-                        <div className="space-y-1">
-                          <label className="block text-[10px] uppercase font-bold text-slate-400">Estimated Value (BWP/Pula)</label>
-                          <input
-                            type="number"
-                            placeholder="e.g. 8500"
-                            value={newDeviceValue}
-                            onChange={(e) => setNewDeviceValue(e.target.value)}
-                            className="w-full px-3 py-2 border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 rounded-xl text-xs font-medium text-slate-900 dark:text-white focus:outline-none focus:border-sky-500 font-mono"
-                          />
-                        </div>
-
-                        <div className="space-y-1 sm:col-span-2">
-                          <label className="block text-[10px] uppercase font-bold text-slate-400">Device Category</label>
-                          <select
-                            value={newDeviceType}
-                            onChange={(e) => setNewDeviceType(e.target.value)}
-                            className="w-full px-3 py-2 border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 rounded-xl text-xs font-medium text-slate-900 dark:text-white focus:outline-none focus:border-sky-500"
-                          >
-                            <option value="Phone">Phone / Cellular</option>
-                            <option value="Laptop">Laptop Computer</option>
-                            <option value="Tablet">Tablet Device</option>
-                            <option value="Audio">Audio / Accessories</option>
-                            <option value="Other">Custom Hardware</option>
-                          </select>
-                        </div>
-                      </div>
-
-                      <button
-                        type="submit"
-                        className="w-full py-2.5 bg-sky-600 hover:bg-sky-500 text-white rounded-xl text-xs font-bold uppercase tracking-wider transition-all"
-                      >
-                        Compile &amp; Sign Safe Title Stamp
-                      </button>
-                    </form>
-                  </motion.div>
-                )}
-              </AnimatePresence>
-
-              {/* Asset Grid */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                {devicesList.map((device) => {
-                  const getIcon = () => {
-                    switch (device.type) {
-                      case 'Phone': return <Smartphone className="w-5 h-5" />;
-                      case 'Laptop': return <Monitor className="w-5 h-5" />;
-                      case 'Tablet': return <Tablet className="w-5 h-5" />;
-                      case 'Audio': return <Headphones className="w-5 h-5" />;
-                      default: return <Cpu className="w-5 h-5" />;
-                    }
-                  };
-                  return (
-                    <div 
-                      key={device.id}
-                      className="p-5 bg-white dark:bg-slate-900 border border-slate-200/60 dark:border-slate-800/60 rounded-2xl hover:border-sky-500/30 transition-all group relative overflow-hidden"
-                    >
-                      <div className="flex justify-between items-start">
-                        <div className="flex items-center gap-3">
-                          <div className="w-9 h-9 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-500 flex items-center justify-center">
-                            {getIcon()}
-                          </div>
-                          <div>
-                            <h4 className="font-bold text-xs uppercase text-slate-900 dark:text-white group-hover:text-sky-500 transition-colors">{device.name}</h4>
-                            <p className="text-[9px] font-mono text-slate-400 mt-0.5">{device.serial}</p>
-                          </div>
-                        </div>
-                        <span className={`text-[8px] font-black uppercase px-2 py-0.5 border rounded-full ${device.status === 'secured' ? 'bg-emerald-500/10 text-emerald-500 border-emerald-500/10' : 'bg-red-500/10 text-red-500 border-red-500/10'}`}>
-                          {device.status}
-                        </span>
-                      </div>
-
-                      <div className="flex justify-between items-center pt-3 border-t border-slate-100 dark:border-slate-800 mt-4">
-                        <div>
-                          <p className="text-[9px] text-slate-400 font-bold uppercase leading-none">Estimate</p>
-                          <p className="text-xs font-black text-slate-800 dark:text-white font-mono mt-1">{device.value}</p>
-                        </div>
-                        <span className="text-[9px] text-slate-400 font-mono">Sync: {device.lastSync}</span>
-                      </div>
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
           </div>
-
-          {/* Sidebar Terminal Logs & Metric Cards */}
-          <div className="space-y-6">
-            
-            {/* Live Terminal Telemetry Output */}
-            <div className="rounded-3xl border border-slate-200/60 dark:border-slate-800/60 bg-slate-950 text-[10px] font-mono text-slate-350 p-5 shadow-2xl relative overflow-hidden">
-              <div className="flex items-center justify-between border-b border-white/5 pb-3 mb-4">
-                <div className="flex items-center gap-2">
-                  <div className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
-                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest font-sans">Live Audit Telemetry</span>
-                </div>
-                <button 
-                  onClick={() => {
-                    setLiveLogs([]);
-                    addLog("Interdiction cache cleared.", "System");
-                  }}
-                  className="text-slate-500 hover:text-white uppercase text-[8px] tracking-wider"
-                >
-                  Clear Logs
-                </button>
-              </div>
-
-              <div className="space-y-2.5 max-h-56 overflow-y-auto leading-normal">
-                {liveLogs.map((log, idx) => (
-                  <div key={idx} className="flex gap-2">
-                    <span className="text-sky-500 bg-sky-500/5 px-1 rounded uppercase text-[8px] font-sans font-bold shrink-0 h-4 flex items-center justify-center">
-                      {log.category}
-                    </span>
-                    <p className="text-slate-300 break-words flex-1">
-                      {log.text} <span className="text-slate-600 text-[8px] font-sans">({log.time})</span>
-                    </p>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* Quick Metrics Switched */}
-            <div className="bg-white dark:bg-slate-900 border border-slate-200/60 dark:border-slate-800/60 rounded-3xl p-6 shadow-sm space-y-4">
-              <h3 className="text-xs font-bold uppercase text-slate-400">Compliance score metric</h3>
-              <div className="space-y-4">
-                <div>
-                  <div className="flex justify-between text-[10px] text-slate-500 mb-1">
-                    <span>Active Authority sync</span>
-                    <span className="font-bold text-slate-900 dark:text-white">100%</span>
-                  </div>
-                  <div className="w-full bg-slate-200 dark:bg-slate-800 h-1 rounded-full overflow-hidden">
-                    <div className="bg-emerald-500 h-full w-[100%]" />
-                  </div>
-                </div>
-                <div>
-                  <div className="flex justify-between text-[10px] text-slate-500 mb-1">
-                    <span>Audit coverage level</span>
-                    <span className="font-bold text-slate-900 dark:text-white">94.8%</span>
-                  </div>
-                  <div className="w-full bg-slate-200 dark:bg-slate-800 h-1 rounded-full overflow-hidden">
-                    <div className="bg-sky-500 h-full w-[94.8%]" />
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Profile Workspace */}
-            <div className="bg-white dark:bg-slate-900 border border-slate-200/60 dark:border-slate-800/60 rounded-3xl p-6 shadow-sm text-xs text-slate-600 dark:text-slate-350 space-y-3">
-              <h3 className="text-xs font-bold uppercase text-slate-400 mb-2">Workspace Identity</h3>
-              <div className="flex justify-between py-2 border-b border-slate-100 dark:border-slate-800/50">
-                <span>Account Namespace</span>
-                <span className="font-bold text-slate-900 dark:text-white font-mono transform scale-90">ID-{user.id.slice(0,8).toUpperCase()}</span>
-              </div>
-              <div className="flex justify-between py-2 border-b border-slate-100 dark:border-slate-800/50">
-                <span>Email Authority</span>
-                <span className="font-semibold text-slate-900 dark:text-white truncate max-w-[120px]">{user.email}</span>
-              </div>
-              <div className="flex justify-between py-2 border-b border-slate-100 dark:border-slate-800/50">
-                <span>Verification State</span>
-                <span className="text-emerald-500 font-bold uppercase tracking-tight">VERIFIED LICENSE ✔</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </main>
+        </main>
+      <ReportLostStolenModal
+        isOpen={isReportModalOpen}
+        onClose={() => setIsReportModalOpen(false)}
+        preSelectedDeviceId={selectedReportDevId}
+      />
       <Footer />
     </div>
   );

@@ -1,0 +1,162 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile representation in ElectroShield Registry",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Unique identifier of the authenticated user"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Email address of the user"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Display name of the user"
+        },
+        "role": {
+          "type": "string",
+          "description": "Account role/type in the ecosystem",
+          "enum": ["individual", "family", "retailer", "corporate", "burs", "insurer", "academic_institutions", "recycler", "repair_centers", "bocra", "developer", "mno", "police", "admin"]
+        }
+      },
+      "required": ["uid", "email"]
+    },
+    "Device": {
+      "title": "Device",
+      "description": "Registered electronic device representation",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique device record ID"
+        },
+        "name": {
+          "type": "string",
+          "description": "Name or title of the electronic device",
+          "maxLength": 150
+        },
+        "brand": {
+          "type": "string",
+          "description": "Brand / Manufacturer",
+          "maxLength": 100
+        },
+        "model": {
+          "type": "string",
+          "description": "Hardware model number / specifications",
+          "maxLength": 100
+        },
+        "serial": {
+          "type": "string",
+          "description": "Device serial number",
+          "maxLength": 100
+        },
+        "imei": {
+          "type": "string",
+          "description": "IMEI identifier (for mobile/cellular devices)",
+          "maxLength": 50
+        },
+        "type": {
+          "type": "string",
+          "description": "Device category (e.g. Phone, Laptop, Tablet, Watch)",
+          "maxLength": 50
+        },
+        "status": {
+          "type": "string",
+          "description": "Security and registry status",
+          "enum": ["secured", "caution", "lost", "recycled", "pending_transfer"]
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "UID of the registered owner"
+        },
+        "value": {
+          "type": "string",
+          "description": "Estimated or insured financial value"
+        }
+      },
+      "required": ["name", "brand", "serial", "ownerId"]
+    },
+    "Organization": {
+      "title": "Organization",
+      "description": "Enterprise, agency, or retailer registry entity",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Organization business or departmental name",
+          "maxLength": 150
+        },
+        "type": {
+          "type": "string",
+          "description": "Category of institution or partner"
+        },
+        "adminName": {
+          "type": "string",
+          "description": "Primary administrator contact name"
+        },
+        "adminEmail": {
+          "type": "string",
+          "format": "email",
+          "description": "Primary administrator email address"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "suspended", "pending_verification"]
+        }
+      },
+      "required": ["name", "type", "adminEmail"]
+    },
+    "SubUser": {
+      "title": "SubUser",
+      "description": "Sub-user employee or agent under an organization",
+      "type": "object",
+      "properties": {
+        "orgId": {
+          "type": "string",
+          "description": "Parent organization ID"
+        },
+        "name": {
+          "type": "string",
+          "description": "Sub-user full name"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Sub-user email address"
+        },
+        "role": {
+          "type": "string",
+          "description": "Role within the organization"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "suspended"]
+        }
+      },
+      "required": ["orgId", "name", "email"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "User profile collection"
+    },
+    "/devices/{deviceId}": {
+      "schema": { "$ref": "#/entities/Device" },
+      "description": "Registered devices collection"
+    },
+    "/organizations/{orgId}": {
+      "schema": { "$ref": "#/entities/Organization" },
+      "description": "Registered organizations and institutions"
+    },
+    "/subUsers/{subUserId}": {
+      "schema": { "$ref": "#/entities/SubUser" },
+      "description": "Sub-users linked to organizations"
+    }
+  }
+}

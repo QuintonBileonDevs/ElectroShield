@@ -3,17 +3,23 @@ import { motion, AnimatePresence } from "motion/react";
 import Link from "next/link";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
-import { Shield, ArrowRight, ArrowLeft, ChevronDown, Check } from "lucide-react";
+import { Shield, ArrowRight, ArrowLeft, ChevronDown, Check, Loader2 } from "lucide-react";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { Logo } from "@/components/Logo";
 import { useState, useRef, useEffect } from "react";
 import { ACCOUNT_TYPES, PUBLIC_ACCOUNT_TYPES, ACCOUNT_FIELDS } from "@/lib/account-types";
+import { useAuth } from "@/components/auth-provider";
+import { doc, setDoc } from "firebase/firestore";
+import { db } from "@/lib/firebase";
 
 export default function CompleteRegistrationPage() {
   const router = useRouter();
-  const [selectedType, setSelectedType] = useState<string | null>(null);
+  const { user } = useAuth();
+  const [selectedType, setSelectedType] = useState<string | null>('individual');
   const [step, setStep] = useState<number>(1);
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [formData, setFormData] = useState<Record<string, string>>({});
   const dropdownRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -36,12 +42,30 @@ export default function CompleteRegistrationPage() {
     setStep(1);
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (selectedType) {
+    if (!selectedType) return;
+    setIsSubmitting(true);
+
+    try {
+      if (user?.id) {
+        await setDoc(doc(db, "users", user.id), {
+          role: selectedType,
+          accountType: selectedType,
+          profileCompleted: true,
+          updatedAt: new Date().toISOString(),
+          displayName: formData.full_name || user.name,
+          email: formData.email || user.email,
+          ...formData
+        }, { merge: true });
+      }
       localStorage.setItem("mock_account_type", selectedType);
+    } catch (err) {
+      console.warn("Could not save to firestore:", err);
+    } finally {
+      setIsSubmitting(false);
+      router.push('/dashboard');
     }
-    router.push('/dashboard'); // Mock redirect to dashboard after completion
   };
 
   return (
@@ -291,12 +315,20 @@ export default function CompleteRegistrationPage() {
                       {selectedType && ACCOUNT_FIELDS[selectedType]?.fields.map((field: any) => {
                         const Icon = field.icon;
                         const isFullWidth = field.type === "text" && field.name.includes("address");
+                        const val = formData[field.name] || (field.name === 'full_name' ? user?.name : field.name === 'email' ? user?.email : '') || '';
+                        const isAutoFilled = (field.name === 'full_name' || field.name === 'email') && Boolean(val);
                         
                         return (
                           <div key={field.name} className={`space-y-3 ${isFullWidth ? 'md:col-span-2' : ''}`}>
-                             <label className="text-xs font-black text-slate-400 dark:text-slate-500 uppercase tracking-[0.2em] flex items-center gap-2 px-1">
-                               {field.label}
-                               {!field.required && <span className="text-[10px] font-bold text-slate-300 dark:text-white/20 tracking-normal">(OPTIONAL)</span>}
+                             <label className="text-xs font-black text-slate-400 dark:text-slate-500 uppercase tracking-[0.2em] flex items-center justify-between px-1">
+                               <span>{field.label}</span>
+                               {isAutoFilled ? (
+                                 <span className="text-[10px] font-bold text-sky-500 dark:text-sky-400 tracking-normal flex items-center gap-1">
+                                   <Check className="w-3 h-3 stroke-[3]" /> Auto-filled
+                                 </span>
+                               ) : !field.required ? (
+                                 <span className="text-[10px] font-bold text-slate-300 dark:text-white/20 tracking-normal">(OPTIONAL)</span>
+                               ) : null}
                              </label>
                              <div className="relative group/input">
                                <div className="absolute inset-y-0 left-0 pl-5 flex items-center pointer-events-none transition-colors group-focus-within/input:text-sky-500">
@@ -307,8 +339,9 @@ export default function CompleteRegistrationPage() {
                                  <div className="relative">
                                    <select 
                                      required={field.required}
+                                     value={val}
+                                     onChange={(e) => setFormData(prev => ({ ...prev, [field.name]: e.target.value }))}
                                      className="w-full pl-14 pr-12 py-5 bg-slate-50 dark:bg-black/20 border-2 border-slate-200 dark:border-white/5 rounded-2xl text-slate-900 dark:text-white focus:outline-none focus:ring-4 focus:ring-sky-500/10 focus:border-sky-500 transition-all font-bold tracking-tight appearance-none cursor-pointer"
-                                     defaultValue=""
                                    >
                                      <option value="" disabled>Select Parameter</option>
                                      {field.options.map((opt: any) => (
@@ -324,6 +357,8 @@ export default function CompleteRegistrationPage() {
                                    type={field.type} 
                                    placeholder={field.placeholder} 
                                    required={field.required}
+                                   value={val}
+                                   onChange={(e) => setFormData(prev => ({ ...prev, [field.name]: e.target.value }))}
                                    className="w-full pl-14 pr-5 py-5 bg-slate-50 dark:bg-black/20 border-2 border-slate-200 dark:border-white/5 rounded-2xl text-slate-900 dark:text-white focus:outline-none focus:ring-4 focus:ring-sky-500/10 focus:border-sky-500 transition-all font-bold tracking-tight placeholder:text-slate-300 dark:placeholder:text-slate-700"
                                  />
                                )}
